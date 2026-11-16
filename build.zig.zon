@@ -1,0 +1,13 @@
+.{
+    .name = .mc_server_bench,
+    .version = "0.1.0",
+    .fingerprint = 0x0a293bfdb1dd2b19,
+    .minimum_zig_version = "0.17.0",
+    // The bots speak the protocol through Lightning Rod's packet definitions, pinned with it.
+    .dependencies = .{
+        .protocols = .{ .path = "servers/lightning-rod/protocols" },
+        .minecraft_packets = .{ .path = "servers/lightning-rod/minecraft_packets" },
+        .minecraft_java = .{ .path = "servers/lightning-rod/minecraft_java" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

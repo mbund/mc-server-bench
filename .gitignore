@@ -1,0 +1,6 @@
+zig-out/
+.zig-cache/
+runs/
+servers/vanilla/
+servers/build/
+zig-pkg/

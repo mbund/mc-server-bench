@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Server benchmark</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f4f2;
+  --surface-1: #fcfcfb;
+  --grid: #e4e3df;
+  --axis: #c9c8c2;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #7a7974;
+  --accent: #2a78d6;
+  --critical: #c42b2b;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-0: #111110;
+    --surface-1: #1a1a19;
+    --grid: #2b2b29;
+    --axis: #45443f;
+    --text-primary: #f0efec;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8f8e86;
+    --accent: #3987e5;
+    --critical: #e66767;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #111110;
+  --surface-1: #1a1a19;
+  --grid: #2b2b29;
+  --axis: #45443f;
+  --text-primary: #f0efec;
+  --text-secondary: #c3c2b7;
+  --text-muted: #8f8e86;
+  --accent: #3987e5;
+  --critical: #e66767;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; margin: 0 0 4px; font-weight: 600; }
+.lede { color: var(--text-secondary); margin: 0 0 20px; max-width: 70ch; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; margin-bottom: 16px; }
+.segmented { display: inline-flex; background: var(--surface-1); border: 1px solid var(--grid); border-radius: 8px; padding: 2px; }
+.segmented button {
+  font: inherit; color: var(--text-secondary); background: none; border: 0; border-radius: 6px;
+  padding: 5px 12px; cursor: pointer;
+}
+.segmented button[aria-pressed="true"] { background: var(--surface-0); color: var(--text-primary); font-weight: 600; }
+.segmented button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--text-secondary); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.key { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.about { color: var(--text-secondary); margin: 0 0 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.card { background: var(--surface-1); border: 1px solid var(--grid); border-radius: 10px; padding: 14px 14px 8px; position: relative; min-width: 0; }
+.card h2 { font-size: 14px; font-weight: 600; margin: 0; }
+.card p { margin: 2px 0 8px; color: var(--text-muted); font-size: 12px; }
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+svg text { fill: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+svg .end { fill: var(--text-secondary); }
+.tooltip {
+  position: absolute; pointer-events: none; background: var(--surface-1); border: 1px solid var(--axis);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgb(0 0 0 / 0.12);
+  min-width: 170px; z-index: 2;
+}
+.tooltip .row { display: flex; align-items: center; gap: 6px; }
+.tooltip .row strong { margin-left: auto; padding-left: 12px; font-variant-numeric: tabular-nums; }
+.tooltip .head { color: var(--text-secondary); margin-bottom: 4px; }
+.tooltip .warn { color: var(--critical); }
+table { width: 100%; border-collapse: collapse; background: var(--surface-1); border: 1px solid var(--grid); border-radius: 10px; overflow: hidden; font-size: 12px; }
+th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; background: var(--surface-1); }
+.table-wrap { overflow-x: auto; margin-top: 24px; border-radius: 10px; }
+.problems { color: var(--critical); white-space: normal; text-align: left; min-width: 220px; }
+h3 { font-size: 15px; margin: 28px 0 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Server benchmark</h1>
+  <p class="lede" id="lede"></p>
+  <div class="controls">
+    <div class="segmented" id="scenarios" role="group" aria-label="Scenario"></div>
+    <div class="segmented" id="scales" role="group" aria-label="Scale">
+      <button type="button" data-scale="linear" aria-pressed="true">Linear</button>
+      <button type="button" data-scale="log" aria-pressed="false">Log</button>
+    </div>
+    <div class="legend" id="legend"></div>
+  </div>
+  <p class="about" id="about"></p>
+  <div class="grid" id="charts"></div>
+  <h3>Every run</h3>
+  <div class="table-wrap"><table id="table"></table></div>
+</main>
+<script>
+const results = /*RESULTS*/[];
+
+// Each server keeps its color whatever is shown.
+const servers = [
+  { id: "vanilla", name: "Vanilla", color: "var(--series-1)" },
+  { id: "lightning-rod", name: "Lightning Rod", color: "var(--series-2)" },
+  { id: "pumpkin", name: "Pumpkin", color: "var(--series-3)" },
+  { id: "steel", name: "SteelMC", color: "var(--series-4)" },
+];
+const scenarios = {
+  idle: "Everyone stands still at spawn.",
+  wander: "Everyone walks at random within 24 blocks of spawn, in sight of each other.",
+  spread: "Everyone flies to a spot of their own, far enough apart that views never overlap, and hovers there.",
+  explore: "Everyone flies outward at 20 blocks a second into terrain never generated before.",
+  build: "Everyone places or breaks a block every tick at a spot of their own near spawn.",
+};
+const metrics = [
+  { key: r => r.window.cpu_ms_per_tick, title: "CPU per tick", unit: "ms", about: "CPU time of every server thread, divided by ticks run" },
+  { key: r => r.window.mspt.mean_ms, title: "Mean tick time", unit: "ms", about: "The server's own measure of a tick, from start to end", optional: true },
+  { key: r => r.window.mspt.p99_ms, title: "Slowest ticks (p99)", unit: "ms", about: "One tick in a hundred takes this long or longer", optional: true },
+  { key: r => r.window.tps, title: "Ticks per second", unit: "tps", about: "Game time the bots saw pass, per second; 20 is full speed", fixedTop: 20 },
+  { key: r => r.window.rss_mb_mean, title: "Memory", unit: "MB", about: "Resident memory, averaged over the measured window" },
+  { key: r => r.peak_rss_mb, title: "Peak memory", unit: "MB", about: "The most resident memory at any point in the run" },
+  { key: r => r.window.received_kb_per_s_per_player, title: "Bandwidth per player", unit: "KB/s", about: "Bytes from the server to each bot, after compression" },
+  { key: r => r.window.disk_write_mb / r.window.seconds * 60, title: "Disk writes", unit: "MB/min", about: "Bytes written to storage while measured" },
+  { key: r => r.world_mb, title: "World size", unit: "MB", about: "Everything saved for the world when the run ended" },
+  { key: r => r.view_s, title: "Time to a full view", unit: "s", about: "Median time from a bot spawning to holding every chunk in view" },
+  { key: r => r.startup_s, title: "Startup", unit: "s", about: "From launch to answering a status ping" },
+];
+
+let scenario = null;
+let scale = "linear";
+const present = [...new Set(results.map(r => r.scenario))];
+const order = Object.keys(scenarios).filter(s => present.includes(s));
+scenario = order[0] ?? null;
+
+function format(value, unit) {
+  if (value == null || !isFinite(value)) return "–";
+  const digits = value >= 100 ? 0 : value >= 10 ? 1 : value >= 1 ? 2 : 3;
+  return value.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: Math.min(digits, 1) }) + (unit === "tps" ? "" : " " + unit);
+}
+
+function niceTicks(max) {
+  if (max <= 0) return [0, 1];
+  const raw = max / 4;
+  const power = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map(f => f * power).find(s => s >= raw);
+  const ticks = [];
+  for (let v = 0; v <= max + step * 0.001; v += step) ticks.push(v);
+  if (ticks[ticks.length - 1] < max) ticks.push(ticks[ticks.length - 1] + step);
+  return ticks;
+}
+
+function logTicks(min, max) {
+  const ticks = [];
+  for (let e = Math.floor(Math.log10(min)); e <= Math.ceil(Math.log10(max)); e++) ticks.push(Math.pow(10, e));
+  return ticks;
+}
+
+function el(name, attributes = {}, parent) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [k, v] of Object.entries(attributes)) node.setAttribute(k, v);
+  if (parent) parent.appendChild(node);
+  return node;
+}
+
+function chart(card, metric, runs) {
+  const counts = [...new Set(runs.map(r => r.players))].sort((a, b) => a - b);
+  const width = Math.max(300, card.clientWidth - 28);
+  const height = 220;
+  const pad = { left: 52, right: 96, top: 10, bottom: 28 };
+  const series = servers.map(s => ({
+    ...s,
+    points: counts.map(c => runs.find(r => r.server === s.id && r.players === c)).map((r, i) => r ? { x: counts[i], v: metric.key(r), run: r } : null).filter(p => p && isFinite(p.v) && !(metric.optional && p.run.window.mspt.source === "none")),
+  })).filter(s => s.points.length);
+  const values = series.flatMap(s => s.points.map(p => p.v));
+  const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": `${metric.title} by player count` });
+  if (!values.length) {
+    const t = el("text", { x: width / 2, y: height / 2, "text-anchor": "middle" }, svg);
+    t.textContent = "No server reports this";
+    return svg;
+  }
+  const log = scale === "log" && values.every(v => v > 0);
+  let ticks, y;
+  const plotH = height - pad.top - pad.bottom;
+  if (log) {
+    ticks = logTicks(Math.min(...values), Math.max(...values));
+    const lo = Math.log10(ticks[0]), hi = Math.log10(ticks[ticks.length - 1]);
+    y = v => pad.top + plotH * (1 - (Math.log10(v) - lo) / (hi - lo || 1));
+  } else {
+    ticks = niceTicks(Math.max(metric.fixedTop ?? 0, ...values));
+    const top = ticks[ticks.length - 1];
+    y = v => pad.top + plotH * (1 - v / top);
+  }
+  const plotW = width - pad.left - pad.right;
+  const x = c => pad.left + (counts.length === 1 ? plotW / 2 : plotW * counts.indexOf(c) / (counts.length - 1));
+  for (const t of ticks) {
+    el("line", { x1: pad.left, x2: width - pad.right, y1: y(t), y2: y(t), stroke: "var(--grid)", "stroke-width": 1 }, svg);
+    const label = el("text", { x: pad.left - 8, y: y(t) + 4, "text-anchor": "end" }, svg);
+    label.textContent = t >= 10000 ? (t / 1000) + "K" : t.toLocaleString();
+  }
+  for (const c of counts) {
+    const label = el("text", { x: x(c), y: height - 8, "text-anchor": "middle" }, svg);
+    label.textContent = c;
+  }
+  const xTitle = el("text", { x: width - pad.right + 8, y: height - 8 }, svg);
+  xTitle.textContent = "players";
+  for (const s of series) {
+    const d = s.points.map((p, i) => `${i ? "L" : "M"}${x(p.x)},${y(p.v)}`).join("");
+    el("path", { d, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    for (const p of s.points) {
+      const failed = p.run.problems.length > 0;
+      el("circle", { cx: x(p.x), cy: y(p.v), r: 4, fill: failed ? "var(--surface-1)" : s.color, stroke: failed ? s.color : "var(--surface-1)", "stroke-width": 2 }, svg);
+    }
+  }
+  // End labels, nudged apart only by their own height and joined to their lines when moved.
+  const ends = series.map(s => ({ s, p: s.points[s.points.length - 1] })).map(e => ({ ...e, y0: y(e.p.v), y: y(e.p.v) })).sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 13) ends[i].y = ends[i - 1].y + 13;
+  for (const e of ends) {
+    const lx = x(e.p.x) + 8;
+    if (Math.abs(e.y - e.y0) > 1) el("line", { x1: x(e.p.x) + 5, y1: e.y0, x2: lx + 2, y2: e.y, stroke: "var(--axis)", "stroke-width": 1 }, svg);
+    const t = el("text", { x: lx + 4, y: e.y + 4, class: "end" }, svg);
+    t.textContent = format(e.p.v, metric.unit);
+  }
+  // The crosshair snaps to the nearest player count and reads out every server there.
+  const hair = el("line", { y1: pad.top, y2: height - pad.bottom, stroke: "var(--axis)", "stroke-width": 1, visibility: "hidden" }, svg);
+  const hit = el("rect", { x: pad.left - 12, y: 0, width: plotW + 24, height, fill: "transparent" }, svg);
+  const tip = document.createElement("div");
+  tip.className = "tooltip";
+  tip.hidden = true;
+  card.appendChild(tip);
+  hit.addEventListener("pointermove", event => {
+    const box = svg.getBoundingClientRect();
+    const px = (event.clientX - box.left) * width / box.width;
+    const c = counts.reduce((best, c) => Math.abs(x(c) - px) < Math.abs(x(best) - px) ? c : best, counts[0]);
+    hair.setAttribute("x1", x(c));
+    hair.setAttribute("x2", x(c));
+    hair.setAttribute("visibility", "visible");
+    tip.replaceChildren();
+    const head = document.createElement("div");
+    head.className = "head";
+    head.textContent = `${c} player${c === 1 ? "" : "s"}`;
+    tip.appendChild(head);
+    for (const s of series) {
+      const p = s.points.find(p => p.x === c);
+      if (!p) continue;
+      const row = document.createElement("div");
+      row.className = "row";
+      const key = document.createElement("span");
+      key.className = "key";
+      key.style.background = s.color;
+      const name = document.createElement("span");
+      name.textContent = s.name;
+      const value = document.createElement("strong");
+      value.textContent = format(p.v, metric.unit);
+      row.append(key, name, value);
+      tip.appendChild(row);
+      if (p.run.problems.length) {
+        const warn = document.createElement("div");
+        warn.className = "warn";
+        warn.textContent = `${p.run.problems.length} problem${p.run.problems.length === 1 ? "" : "s"}, see the table`;
+        tip.appendChild(warn);
+      }
+    }
+    const cardBox = card.getBoundingClientRect();
+    const left = box.left - cardBox.left + x(c) * box.width / width;
+    tip.hidden = false;
+    tip.style.top = `${box.top - cardBox.top + 8}px`;
+    tip.style.left = `${Math.min(left + 12, cardBox.width - tip.offsetWidth - 8)}px`;
+    if (left + 12 + tip.offsetWidth > cardBox.width - 8) tip.style.left = `${Math.max(8, left - tip.offsetWidth - 12)}px`;
+  });
+  hit.addEventListener("pointerleave", () => {
+    hair.setAttribute("visibility", "hidden");
+    tip.hidden = true;
+  });
+  return svg;
+}
+
+function render() {
+  const runs = results.filter(r => r.scenario === scenario);
+  document.getElementById("about").textContent = scenarios[scenario] ?? "";
+  const charts = document.getElementById("charts");
+  charts.replaceChildren();
+  for (const metric of metrics) {
+    const card = document.createElement("section");
+    card.className = "card";
+    const title = document.createElement("h2");
+    title.textContent = `${metric.title} (${metric.unit})`;
+    const about = document.createElement("p");
+    about.textContent = metric.about;
+    card.append(title, about);
+    charts.appendChild(card);
+    card.appendChild(chart(card, metric, runs));
+  }
+  const table = document.getElementById("table");
+  table.replaceChildren();
+  const columns = [
+    ["Server", r => servers.find(s => s.id === r.server)?.name ?? r.server],
+    ["Players", r => r.players],
+    ["CPU ms/tick", r => format(r.window.cpu_ms_per_tick, "")],
+    ["Cores", r => format(r.window.cpu_cores, "")],
+    ["MSPT", r => r.window.mspt.source === "none" ? "–" : format(r.window.mspt.mean_ms, "")],
+    ["p99", r => r.window.mspt.source === "none" ? "–" : format(r.window.mspt.p99_ms, "")],
+    ["TPS", r => format(r.window.tps, "tps")],
+    ["RAM MB", r => format(r.window.rss_mb_mean, "")],
+    ["Peak MB", r => format(r.peak_rss_mb, "")],
+    ["KB/s/player", r => format(r.window.received_kb_per_s_per_player, "")],
+    ["Chunks/s", r => format(r.window.chunks_per_s, "")],
+    ["Writes MB", r => format(r.window.disk_write_mb, "")],
+    ["World MB", r => format(r.world_mb, "")],
+    ["Busiest thread", r => r.window.threads[0] ? `${r.window.threads[0].name} ${format(r.window.threads[0].ms_per_tick, "ms")}` : "–"],
+    ["Problems", r => r.problems.length ? r.problems.slice(0, 3).join("; ") + (r.problems.length > 3 ? `; and ${r.problems.length - 3} more` : "") : "none"],
+  ];
+  const head = table.createTHead().insertRow();
+  for (const [name] of columns) {
+    const th = document.createElement("th");
+    th.textContent = name;
+    head.appendChild(th);
+  }
+  const body = table.createTBody();
+  const sorted = [...runs].sort((a, b) => a.players - b.players || servers.findIndex(s => s.id === a.server) - servers.findIndex(s => s.id === b.server));
+  for (const r of sorted) {
+    const row = body.insertRow();
+    columns.forEach(([name, value], i) => {
+      const cell = row.insertCell();
+      cell.textContent = value(r);
+      if (i === columns.length - 1 && r.problems.length) cell.className = "problems";
+    });
+  }
+}
+
+function controls() {
+  const group = document.getElementById("scenarios");
+  for (const s of order) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = s;
+    button.setAttribute("aria-pressed", String(s === scenario));
+    button.addEventListener("click", () => {
+      scenario = s;
+      for (const b of group.children) b.setAttribute("aria-pressed", String(b === button));
+      render();
+    });
+    group.appendChild(button);
+  }
+  for (const button of document.getElementById("scales").children) {
+    button.addEventListener("click", () => {
+      scale = button.dataset.scale;
+      for (const b of button.parentElement.children) b.setAttribute("aria-pressed", String(b === button));
+      render();
+    });
+  }
+  const legend = document.getElementById("legend");
+  const shown = servers.filter(s => results.some(r => r.server === s.id));
+  for (const s of shown) {
+    const item = document.createElement("span");
+    const key = document.createElement("span");
+    key.className = "key";
+    key.style.background = s.color;
+    item.append(key, document.createTextNode(s.name));
+    legend.appendChild(item);
+  }
+  const when = results.length ? new Date(Math.min(...results.map(r => r.started_unix_s)) * 1000) : null;
+  const failed = results.filter(r => r.problems.length).length;
+  document.getElementById("lede").textContent =
+    `${results.length} runs across ${shown.length} servers on Minecraft 26.2, each from a fresh flat world with view distance 10` +
+    (when ? `, measured ${when.toLocaleDateString()}` : "") +
+    `. Hollow points mark runs where bots saw something wrong` + (failed ? ` (${failed} runs)` : "") + `.`;
+}
+
+controls();
+render();
+let resizing;
+let drawnWidth = document.getElementById("charts").clientWidth;
+// Redraw on width changes only, since drawing itself changes the height.
+new ResizeObserver(() => {
+  const width = document.getElementById("charts").clientWidth;
+  if (width === drawnWidth) return;
+  drawnWidth = width;
+  clearTimeout(resizing);
+  resizing = setTimeout(render, 150);
+}).observe(document.getElementById("charts"));
+</script>
+</body>
+</html>

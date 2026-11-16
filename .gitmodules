@@ -1,0 +1,9 @@
+[submodule "servers/pumpkin"]
+	path = servers/pumpkin
+	url = https://github.com/Pumpkin-MC/Pumpkin
+[submodule "servers/lightning-rod"]
+	path = servers/lightning-rod
+	url = https://github.com/mbund/lightning-rod
+[submodule "servers/steel"]
+	path = servers/steel
+	url = https://github.com/Steel-Foundation/SteelMC
