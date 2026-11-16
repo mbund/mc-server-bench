@@ -296,21 +296,18 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         .steel => {
             const config = try path(allocator, options.directory, "config");
             try cwd.createDirPath(io, config);
-            try cwd.writeFile(io, .{ .sub_path = try path(allocator, config, "config.toml"), .data = try std.fmt.allocPrint(allocator,
-                \\[server]
-                \\server_port = {d}
-                \\max_players = {d}
-                \\view_distance = {d}
-                \\simulation_distance = {d}
-                \\online_mode = false
-                \\encryption = false
-                \\allow_flight = true
-                \\use_favicon = false
-                \\
-                \\[server.compression]
-                \\threshold = 256
-                \\
-            , .{ options.port, @max(20, options.players + 1), scenario.view_distance, scenario.view_distance }) });
+            // SteelMC wants every setting, so its own defaults are the base and only ours change.
+            var text = try cwd.readFileAlloc(io, try path(allocator, options.root, "servers/steel/package-content/config.toml"), allocator, .limited(1 << 20));
+            text = try setting(allocator, text, "server_port", try std.fmt.allocPrint(allocator, "{d}", .{options.port}));
+            text = try setting(allocator, text, "max_players", try std.fmt.allocPrint(allocator, "{d}", .{@max(20, options.players + 1)}));
+            text = try setting(allocator, text, "view_distance", try std.fmt.allocPrint(allocator, "{d}", .{scenario.view_distance}));
+            text = try setting(allocator, text, "simulation_distance", try std.fmt.allocPrint(allocator, "{d}", .{scenario.view_distance}));
+            text = try setting(allocator, text, "online_mode", "false");
+            text = try setting(allocator, text, "encryption", "false");
+            text = try setting(allocator, text, "allow_flight", "true");
+            text = try setting(allocator, text, "use_favicon", "false");
+            text = try setting(allocator, text, "threshold", "256");
+            try cwd.writeFile(io, .{ .sub_path = try path(allocator, config, "config.toml"), .data = text });
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, config, "worlds.toml"), .data =
                 \\save_path = "saves"
                 \\seed = ""
@@ -350,4 +347,25 @@ test "tick report lines parse with and without color codes" {
     try std.testing.expectEqual(@as(?f64, 0.2), number("Average time per tick: 0.2ms (Target: 50.0ms)", "Average time per tick: "));
     try std.testing.expectEqual(@as(?f64, 2.1), number("[INFO]: Percentiles: P50: 0.2ms P95: 0.2ms P99: \x1b[32m2.1ms. Sample: 100", "P99: "));
     try std.testing.expectEqual(@as(?f64, null), number("Done (0.497s)!", "P50: "));
+}
+
+/// Replaces the value of the first `key = value` line of a TOML text.
+fn setting(allocator: std.mem.Allocator, text: []const u8, key: []const u8, value: []const u8) ![]u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var start: usize = 0;
+    while (lines.next()) |line| : (start += line.len + 1) {
+        const trimmed = std.mem.trimStart(u8, line, " ");
+        if (!std.mem.startsWith(u8, trimmed, key)) continue;
+        const rest = std.mem.trimStart(u8, trimmed[key.len..], " ");
+        if (rest.len == 0 or rest[0] != '=') continue;
+        return std.mem.concat(allocator, u8, &.{ text[0..start], key, " = ", value, text[start + line.len ..] });
+    }
+    return error.MissingSetting;
+}
+
+test "settings replace their own line only" {
+    const text = "[server]\nserver_port = 25565\nmax_players = 20\n";
+    const changed = try setting(std.testing.allocator, text, "max_players", "64");
+    defer std.testing.allocator.free(changed);
+    try std.testing.expectEqualStrings("[server]\nserver_port = 25565\nmax_players = 64\n", changed);
 }

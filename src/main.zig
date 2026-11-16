@@ -432,8 +432,12 @@ fn check(allocator: std.mem.Allocator, swarm: *bot.Swarm, kind: scenario.Kind, p
             .spread, .build => if (counters.get(.arrived_ns) == 0) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} never reached its spot", .{each.label()})),
             .explore => {},
         }
-        if (kind == .build and counters.get(.acks) * 100 < counters.get(.edits) * 95)
-            try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} had {d} of {d} edits acknowledged", .{ each.label(), counters.get(.acks), counters.get(.edits) }));
+        // Servers acknowledge every edit up to a sequence, often several at once, so the newest
+        // acknowledged sequence must keep within a second of the newest edit sent.
+        if (kind == .build and counters.get(.acked_sequence) + 20 < @as(u64, @intCast(each.sequence)))
+            try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} had edits acknowledged up to {d} of {d}", .{ each.label(), counters.get(.acked_sequence), each.sequence }));
+        if (kind == .build and counters.get(.block_changes) == 0)
+            try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} saw no block change", .{each.label()}));
         if (kind == .explore) {
             // A bot flying a block a tick into new terrain needs a new column of chunks every 16 ticks.
             const expected = scenario.viewChunks() + each.ticks / 16 * (2 * scenario.view_distance) / 2;

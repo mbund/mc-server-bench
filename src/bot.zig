@@ -40,6 +40,8 @@ pub const Counter = enum {
     entities_removed,
     edits,
     acks,
+    /// The highest edit sequence the server acknowledged.
+    acked_sequence,
     block_changes,
     keepalives,
     /// The world age from the last time update, and when it came.
@@ -406,6 +408,8 @@ pub const Bot = struct {
             self.counters.add(.entities_removed, @intCast(@max(0, try reader.varint())));
         } else if (id == In.packetId(.acknowledge_player_digging)) {
             self.counters.add(.acks, 1);
+            const sequence: u64 = @intCast(@max(0, try reader.varint()));
+            if (sequence > self.counters.get(.acked_sequence)) self.counters.set(.acked_sequence, sequence);
         } else if (id == In.packetId(.block_change) or id == In.packetId(.multi_block_change)) {
             self.counters.add(.block_changes, 1);
         } else if (id == In.packetId(.start_configuration)) {
