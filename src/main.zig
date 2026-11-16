@@ -199,8 +199,22 @@ pub const Result = struct {
     stop_s: f64 = 0,
     clean_stop: bool = false,
     bots: BotSummary = .{},
+    /// Everything the bots received over the whole run, per player.
+    traffic: TrafficSummary = .{},
     problems: []const []const u8 = &.{},
     samples: []const Sample = &.{},
+};
+
+pub const PacketTraffic = struct { name: []const u8, count_per_player: f64, kb_per_player: f64, decoded_kb_per_player: f64 };
+
+pub const TrafficSummary = struct {
+    /// Login and configuration, registries included.
+    setup_kb_per_player: f64 = 0,
+    setup_decoded_kb_per_player: f64 = 0,
+    play_kb_per_player: f64 = 0,
+    play_decoded_kb_per_player: f64 = 0,
+    /// Play packets by kind, the heaviest first.
+    packets: []const PacketTraffic = &.{},
 };
 
 pub const BotSummary = struct {
@@ -377,6 +391,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     run.phase = "stop";
     swarm.stop();
     swarm_stopped = true;
+    result.traffic = try traffic(allocator, swarm);
     result.total_received_mb = megabytes(swarm.total(.bytes_in));
     const before_stop = try process.sample(server.pid);
     result.peak_rss_mb = megabytes(before_stop.peak_rss_bytes);
@@ -630,4 +645,38 @@ fn medianGap(allocator: std.mem.Allocator, swarm: *bot.Swarm, from: bot.Counter,
     if (gaps.items.len == 0) return 0;
     std.mem.sort(u64, gaps.items, {}, std.sort.asc(u64));
     return seconds(gaps.items[gaps.items.len / 2]);
+}
+
+fn traffic(allocator: std.mem.Allocator, swarm: *bot.Swarm) !TrafficSummary {
+    const players: f64 = @floatFromInt(swarm.bots.len);
+    var summary: TrafficSummary = .{};
+    var totals: [256]bot.Traffic = @splat(.{});
+    for (swarm.bots) |*each| {
+        summary.setup_kb_per_player += kilobytes(each.setup.wire_bytes) / players;
+        summary.setup_decoded_kb_per_player += kilobytes(each.setup.decoded_bytes) / players;
+        for (&totals, each.play) |*total, kind| {
+            total.count += kind.count;
+            total.wire_bytes += kind.wire_bytes;
+            total.decoded_bytes += kind.decoded_bytes;
+        }
+    }
+    var packets: std.ArrayList(PacketTraffic) = .empty;
+    for (totals, 0..) |total, id| {
+        if (total.count == 0) continue;
+        summary.play_kb_per_player += kilobytes(total.wire_bytes) / players;
+        summary.play_decoded_kb_per_player += kilobytes(total.decoded_bytes) / players;
+        try packets.append(allocator, .{
+            .name = bot.playPacketName(id),
+            .count_per_player = @as(f64, @floatFromInt(total.count)) / players,
+            .kb_per_player = kilobytes(total.wire_bytes) / players,
+            .decoded_kb_per_player = kilobytes(total.decoded_bytes) / players,
+        });
+    }
+    std.mem.sort(PacketTraffic, packets.items, {}, struct {
+        fn heavier(_: void, a: PacketTraffic, b: PacketTraffic) bool {
+            return a.kb_per_player > b.kb_per_player;
+        }
+    }.heavier);
+    summary.packets = packets.items;
+    return summary;
 }

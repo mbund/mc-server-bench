@@ -327,6 +327,7 @@ function render() {
     ["RAM MB", r => format(r.window.rss_mb_mean, "")],
     ["Peak MB", r => format(r.peak_rss_mb, "")],
     ["KB/s/player", r => format(r.window.received_kb_per_s_per_player, "")],
+    ["Total KB/player", r => r.traffic ? format(r.traffic.setup_kb_per_player + r.traffic.play_kb_per_player, "") : "–"],
     ["Chunks/s", r => format(r.window.chunks_per_s, "")],
     ["Writes MB", r => format(r.window.disk_write_mb, "")],
     ["World MB", r => format(r.world_mb, "")],

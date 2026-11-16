@@ -24,8 +24,9 @@ fi
 # Pumpkin, as its README builds it. Its generated data crate needs a deep stack to compile.
 (cd servers/pumpkin && RUST_MIN_STACK=1073741824 cargo build --release)
 
-# SteelMC, from its own flake, which pins the nightly toolchain it needs.
-nix build "path:$root/servers/steel" --out-link "$build/steel"
+# SteelMC, in its own dev shell, which pins the nightly toolchain it needs. Its build downloads
+# vanilla assets, which the sandbox of its Nix package cannot.
+(cd servers/steel && nix develop "path:$PWD" --command cargo build --release -p steel)
 
 # Pumpkin reads flat layers only from vanilla's world generation settings, so vanilla makes them
 # once from the same settings the bench gives it.

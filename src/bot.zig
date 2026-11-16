@@ -74,6 +74,17 @@ pub const Counters = struct {
     }
 };
 
+pub const Traffic = struct { count: u64 = 0, wire_bytes: u64 = 0, decoded_bytes: u64 = 0 };
+
+/// The name of a packet the server sends in play.
+pub fn playPacketName(id: usize) []const u8 {
+    const Names = Protocol.play.toClient.PacketName;
+    inline for (@typeInfo(Names).@"enum".field_names) |name| {
+        if (Protocol.play.toClient.packetId(@field(Names, name)) == id) return name;
+    }
+    return "unknown";
+}
+
 pub const Phase = enum(u8) { waiting, login, configuration, play, failed };
 
 pub const Bot = struct {
@@ -107,6 +118,11 @@ pub const Bot = struct {
     reason: [160]u8 = undefined,
     reason_len: u8 = 0,
     counters: Counters = .{},
+    /// What the server sent before play, and in play by packet id: as it crossed the wire,
+    /// compressed, and as decoded. Only the bot's worker writes these, so they are read after
+    /// the swarm stops.
+    setup: Traffic = .{},
+    play: [256]Traffic = @splat(.{}),
 
     pub fn label(self: *const Bot) []const u8 {
         return self.name[0..self.name_len];
@@ -253,6 +269,10 @@ pub const Bot = struct {
         }
         var reader: Reader = .{ .bytes = body };
         const id = try reader.varint();
+        const traffic = if (self.phase.load(.monotonic) == .play and id >= 0 and id < self.play.len) &self.play[@intCast(id)] else &self.setup;
+        traffic.count += 1;
+        traffic.wire_bytes += raw.len;
+        traffic.decoded_bytes += body.len;
         switch (self.phase.load(.monotonic)) {
             .login => try self.loginPacket(id, &reader),
             .configuration => try self.configurationPacket(id, &reader),

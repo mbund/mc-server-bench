@@ -230,7 +230,7 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
             try std.fmt.allocPrint(allocator, "--metrics-directory={s}", .{options.metrics}),
         }),
         .pumpkin => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/pumpkin/target/release/pumpkin" })}),
-        .steel => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/build/steel/bin/steel" })}),
+        .steel => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/steel/target/release/steel" })}),
     };
 }
 
@@ -271,18 +271,21 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
         },
         .@"lightning-rod" => try cwd.createDirPath(io, options.metrics),
         .pumpkin => {
-            const config = try path(allocator, options.directory, "config");
-            try cwd.createDirPath(io, config);
-            try cwd.writeFile(io, .{ .sub_path = try path(allocator, config, "configuration.toml"), .data = try std.fmt.allocPrint(allocator,
-                \\java_edition = true
-                \\java_edition_address = "0.0.0.0:{d}"
-                \\bedrock_edition = false
+            // Pumpkin reads its settings from the directory it runs in and fills in every one left
+            // out with its default.
+            try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "pumpkin.toml"), .data = try std.fmt.allocPrint(allocator,
+                \\default_gamemode = "Creative"
+                \\
+                \\[networking.java]
+                \\address = "0.0.0.0:{d}"
+                \\encryption = false
+                \\online_mode = false
                 \\max_players = {d}
                 \\view_distance = {d}
                 \\simulation_distance = {d}
-                \\online_mode = false
-                \\encryption = false
-                \\default_gamemode = "Creative"
+                \\
+                \\[networking.bedrock]
+                \\enabled = false
                 \\
             , .{ options.port, @max(20, options.players + 1), scenario.view_distance, scenario.view_distance }) });
             // Pumpkin takes its flat layers from vanilla's world generation settings.
