@@ -21,9 +21,12 @@ record() {
   git -C "servers/$1" rev-parse --short=12 HEAD > "$build/versions/$1"
 }
 
-# Zig builds for this machine unless told a CPU model, as CI does, which builds on one machine and
-# runs on others.
-cpu=-Dcpu=${MC_SERVER_BENCH_ZIG_CPU:-native}
+# Every server built from source targets the same CPU model: this machine's unless told one, as
+# CI does, which builds on one machine and runs on others. Zig names it with underscores and Rust
+# with dashes.
+model=${MC_SERVER_BENCH_CPU:-native}
+cpu=-Dcpu=$model
+rust_cpu=-Ctarget-cpu=${model//_/-}
 
 # The bench builds against Lightning Rod's protocol packages, and so does its Lightning Rod server.
 git submodule update --init servers/lightning-rod
@@ -88,7 +91,7 @@ fi
 if wants pumpkin; then
   git submodule update --init --recursive servers/pumpkin
   if command -v rustup > /dev/null; then (cd servers/pumpkin && rustup toolchain install); fi
-  (cd servers/pumpkin && RUST_MIN_STACK=1073741824 cargo build --release)
+  (cd servers/pumpkin && RUST_MIN_STACK=1073741824 RUSTFLAGS="$rust_cpu" cargo build --release)
   record pumpkin
 fi
 
@@ -102,10 +105,12 @@ if wants steel; then
   for patch in "$root/patches/steel-console-stdin.patch" "$root/patches/steel-forceload.patch"; do
     git -C servers/steel apply --reverse --check "$patch" 2>/dev/null || git -C servers/steel apply "$patch"
   done
+  # The CPU model joins the target flags its own config sets, which RUSTFLAGS would replace.
+  flags="target.x86_64-unknown-linux-gnu.rustflags=[\"$rust_cpu\"]"
   if command -v rustup > /dev/null; then
-    (cd servers/steel && rustup toolchain install && cargo build --release -p steel)
+    (cd servers/steel && rustup toolchain install && cargo build --release -p steel --config "$flags")
   else
-    (cd servers/steel && nix develop "path:$PWD" --command cargo build --release -p steel)
+    (cd servers/steel && nix develop "path:$PWD" --command cargo build --release -p steel --config "$flags")
   fi
   record steel
 fi
