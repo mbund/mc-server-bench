@@ -3,11 +3,20 @@
     .version = "0.1.0",
     .fingerprint = 0x0a293bfdb1dd2b19,
     .minimum_zig_version = "0.17.0",
-    // The bots speak the protocol through Lightning Rod's packet definitions, pinned with it.
+    // The bots speak the protocol through Lightning Rod's packet definitions, and the Lightning
+    // Rod server the bench runs is built from its packages, all pinned with its submodule.
     .dependencies = .{
         .protocols = .{ .path = "servers/lightning-rod/protocols" },
         .minecraft_packets = .{ .path = "servers/lightning-rod/minecraft_packets" },
         .minecraft_java = .{ .path = "servers/lightning-rod/minecraft_java" },
+        .lightning_rod = .{ .path = "servers/lightning-rod" },
+        .lightning_rod_linux = .{ .path = "servers/lightning-rod/linux" },
+        .lightning_rod_vanilla_1_21_6 = .{ .path = "servers/lightning-rod/vanilla" },
+        .sessions = .{ .path = "servers/lightning-rod/sessions" },
+        .chunks = .{ .path = "servers/lightning-rod/chunks" },
+        .connection = .{ .path = "servers/lightning-rod/connection" },
+        .players = .{ .path = "servers/lightning-rod/players" },
+        .terrain = .{ .path = "servers/lightning-rod/terrain" },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

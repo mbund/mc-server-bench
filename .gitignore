@@ -2,5 +2,6 @@ zig-out/
 .zig-cache/
 runs/
 servers/vanilla/
+servers/paper/
 servers/build/
 zig-pkg/

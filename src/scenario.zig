@@ -6,7 +6,7 @@ const Bot = @import("bot.zig").Bot;
 const bot_module = @import("bot.zig");
 
 /// The view distance bots ask for and servers are configured with.
-pub const view_distance = 10;
+pub const view_distance = @import("config.zig").view_distance;
 /// Blocks per tick of creative flight and walking.
 const flight_speed = 1.0;
 const walk_speed = 0.215;

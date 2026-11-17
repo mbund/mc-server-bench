@@ -18,4 +18,24 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{ .root_module = module });
     b.step("test", "Test the harness").dependOn(&b.addRunArtifact(tests).step);
+
+    // The Lightning Rod server the bench runs, built from its packages as any server outside its
+    // repository would be. Its own step, so the harness builds without it.
+    const server = b.addExecutable(.{ .name = "lightning_rod", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/lightning_rod_server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "protocols", .module = protocols },
+            .{ .name = "lightning_rod", .module = b.dependency("lightning_rod", .{ .target = target, .optimize = optimize }).module("lightning_rod") },
+            .{ .name = "profile", .module = b.dependency("lightning_rod_linux", .{ .target = target, .optimize = optimize }).module("lightning_rod_linux") },
+            .{ .name = "lightning_rod_vanilla_1_21_6", .module = b.dependency("lightning_rod_vanilla_1_21_6", .{ .target = target, .optimize = optimize }).module("lightning_rod_vanilla_1_21_6") },
+            .{ .name = "sessions", .module = b.dependency("sessions", .{ .target = target, .optimize = optimize }).module("sessions") },
+            .{ .name = "chunks", .module = b.dependency("chunks", .{ .target = target, .optimize = optimize }).module("chunks") },
+            .{ .name = "connection", .module = b.dependency("connection", .{ .target = target, .optimize = optimize }).module("connection") },
+            .{ .name = "players", .module = b.dependency("players", .{ .target = target, .optimize = optimize }).module("players") },
+            .{ .name = "terrain", .module = b.dependency("terrain", .{ .target = target, .optimize = optimize }).module("terrain") },
+        },
+    }) });
+    b.step("lightning-rod", "Build the Lightning Rod server the bench runs").dependOn(&b.addInstallArtifact(server, .{}).step);
 }

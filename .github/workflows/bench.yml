@@ -1,0 +1,81 @@
+# The standard benchmark: vanilla generates the worlds once, every server runs ./run.sh on its own
+# runner at the same time, and the last job joins their results into one Markdown report, shown
+# on the run's summary page and kept as an artifact. Runners are separate machines, so the report
+# names the machine of every server, and CPU numbers compare less exactly than traffic and sizes.
+name: Benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  terrain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      # The worlds depend only on the vanilla release, the seed and the generator settings.
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            servers/build/terrain/vanilla
+            servers/build/flat
+          key: terrain-${{ hashFiles('setup.sh', 'src/main.zig', 'src/server.zig') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: ./setup.sh terrain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terrain
+          path: |
+            servers/build/terrain/vanilla
+            servers/build/flat
+          retention-days: 1
+
+  bench:
+    needs: terrain
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        server: [vanilla, lightning-rod, pumpkin, steel, paper, paper-antixray-1]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/download-artifact@v4
+        with:
+          name: terrain
+          path: servers/build
+      - run: ./run.sh ${{ matrix.server }}
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.server }}
+          path: runs/standard/results.jsonl
+          if-no-files-found: ignore
+
+  report:
+    needs: bench
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          path: results
+      - run: |
+          ./setup.sh bench
+          mkdir -p runs/standard
+          cat results/*/results.jsonl > runs/standard/results.jsonl
+          ./zig-out/bin/bench report runs/standard
+          cat runs/standard/report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: |
+            runs/standard/report.md
+            runs/standard/results.jsonl

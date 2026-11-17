@@ -4,32 +4,57 @@
 const std = @import("std");
 const linux = std.os.linux;
 const scenario = @import("scenario.zig");
+const config = @import("config.zig");
 
 pub const Kind = enum {
     vanilla,
     @"lightning-rod",
     pumpkin,
     steel,
+    /// Paper as shipped, with anti-xray off.
+    paper,
+    /// Paper with anti-xray replacing ores enclosed by solid blocks with stone.
+    @"paper-antixray-1",
 
-    pub fn stopsFromConsole(kind: Kind) bool {
-        return kind == .vanilla or kind == .pumpkin;
+    pub fn isPaper(kind: Kind) bool {
+        return kind == .paper or kind == .@"paper-antixray-1";
     }
 
-    /// Whether the server answers vanilla's `tick query` on its console.
+    pub fn stopsFromConsole(kind: Kind) bool {
+        return kind != .@"lightning-rod";
+    }
+
+    /// Whether the server answers vanilla's `tick query` on its console. SteelMC does with the
+    /// patch setup.sh applies, which lets it read commands from a pipe.
     pub fn queriesTicks(kind: Kind) bool {
-        return kind == .vanilla or kind == .pumpkin;
+        return kind != .@"lightning-rod";
     }
 
     /// Everything a server stores for its worlds, relative to the server's directory.
     pub fn worldPaths(kind: Kind) []const []const u8 {
         return switch (kind) {
-            .vanilla, .pumpkin => &.{"world"},
+            .vanilla, .pumpkin, .paper, .@"paper-antixray-1" => &.{"world"},
             // Lightning Rod keeps its chunk cache and write ahead log beside the world.
             .@"lightning-rod" => &.{ "world", "world.cache", "world.wal" },
             .steel => &.{"saves"},
         };
     }
 };
+
+/// The release or commit of a server, so a report names what it compared. Releases are the ones
+/// setup.sh pins, and servers built from source report their submodule's commit.
+pub fn version(kind: Kind, allocator: std.mem.Allocator, io: std.Io, root: []const u8) ![]const u8 {
+    const directory = switch (kind) {
+        .vanilla => return "26.2",
+        .paper, .@"paper-antixray-1" => return "26.2 build 135",
+        .@"lightning-rod" => "servers/lightning-rod",
+        .pumpkin => "servers/pumpkin",
+        .steel => "servers/steel",
+    };
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ "git", "-C", try std.fs.path.join(allocator, &.{ root, directory }), "rev-parse", "--short=12", "HEAD" } });
+    if (result.term != .exited or result.term.exited != 0) return error.UnknownCommit;
+    return std.mem.trim(u8, result.stdout, " \n");
+}
 
 /// Flat layers every server builds its world from: stone up to y 63 and grass on top, the world
 /// Lightning Rod generates.
@@ -56,7 +81,6 @@ pub const Options = struct {
     root: []const u8,
     /// A fresh directory the server runs in.
     directory: []const u8,
-    port: u16,
     players: usize,
     cpus: []const u8,
     /// Where Lightning Rod writes its tick samples, off the disk being measured.
@@ -117,7 +141,7 @@ pub const Server = struct {
     /// Settings only a console sets, sent once the server is ready and before anyone joins.
     pub fn configure(self: *Server) !void {
         switch (self.options.kind) {
-            .vanilla, .pumpkin => {
+            .vanilla, .pumpkin, .paper, .@"paper-antixray-1" => {
                 // No natural spawning on any server, so mobs come only from scenarios.
                 try self.console("gamerule spawn_mobs false");
                 // Everyone spawns on the same block, as on the servers without a spawn radius.
@@ -234,16 +258,10 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
         .vanilla => try allocator.dupe([]const u8, &.{
             "java", "-Xmx4G", try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/vanilla/server.jar" }), "--nogui",
         }),
-        .@"lightning-rod" => try allocator.dupe([]const u8, &.{
-            try std.fs.path.join(allocator, &.{ root, "servers/build/lightning-rod/bin/lightning_rod" }),
-            try std.fmt.allocPrint(allocator, "--port={d}", .{options.port}),
-            "--world=world",
-            try std.fmt.allocPrint(allocator, "--max-players={d}", .{@max(32, options.players + 1)}),
-            try std.fmt.allocPrint(allocator, "--view-distance={d}", .{scenario.view_distance}),
-            try std.fmt.allocPrint(allocator, "--simulation-distance={d}", .{scenario.view_distance}),
-            try std.fmt.allocPrint(allocator, "--metrics-directory={s}", .{options.metrics}),
-            // The TPS bossbar is a development overlay that sends to every player.
-            "--no-tps-bar",
+        // Configured in code with the bench's settings, so it takes no flags.
+        .@"lightning-rod" => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/build/lightning-rod/bin/lightning_rod" })}),
+        .paper, .@"paper-antixray-1" => try allocator.dupe([]const u8, &.{
+            "java", "-Xmx4G", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/paper/paper.jar" }), "--nogui",
         }),
         .pumpkin => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/pumpkin/target/release/pumpkin" })}),
         .steel => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/steel/target/release/steel" })}),
@@ -263,7 +281,8 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     }.join;
     const flat = options.terrain == .flat;
     switch (options.kind) {
-        .vanilla => {
+        .vanilla, .paper, .@"paper-antixray-1" => {
+            if (options.kind.isPaper()) try preparePaper(allocator, io, options);
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "eula.txt"), .data = "eula=true\n" });
             var escaped: std.ArrayList(u8) = .empty;
             for (flat_layers_json) |byte| {
@@ -283,11 +302,13 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\max-players={d}
                 \\allow-flight=true
                 \\
-            , .{ options.port, world, scenario.view_distance, scenario.view_distance, @max(20, options.players + 1) }) });
+            , .{ config.port, world, scenario.view_distance, scenario.view_distance, @max(20, options.players + 1) }) });
             if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/vanilla/world"), try path(allocator, options.directory, "world"));
         },
         .@"lightning-rod" => {
             try cwd.createDirPath(io, options.metrics);
+            // It exports tick samples to a fixed directory, which leads to memory off the disk measured.
+            try cwd.symLink(io, options.metrics, try path(allocator, options.directory, config.metrics), .{ .is_directory = true });
             // The import holds the world and the caches it prebuilt, as vanilla's region files
             // hold its light.
             if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/lightning-rod/."), options.directory);
@@ -310,7 +331,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\[networking.bedrock]
                 \\enabled = false
                 \\
-            , .{ terrain_seed, options.port, @max(20, options.players + 1), scenario.view_distance, scenario.view_distance }) });
+            , .{ terrain_seed, config.port, @max(20, options.players + 1), scenario.view_distance, scenario.view_distance }) });
             if (flat) {
                 // Pumpkin takes its flat layers from vanilla's world generation settings.
                 const data = try path(allocator, options.directory, "world/data/minecraft");
@@ -319,11 +340,11 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             } else if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/vanilla/world"), try path(allocator, options.directory, "world"));
         },
         .steel => {
-            const config = try path(allocator, options.directory, "config");
-            try cwd.createDirPath(io, config);
+            const config_directory = try path(allocator, options.directory, "config");
+            try cwd.createDirPath(io, config_directory);
             // SteelMC wants every setting, so its own defaults are the base and only ours change.
             var text = try cwd.readFileAlloc(io, try path(allocator, options.root, "servers/steel/package-content/config.toml"), allocator, .limited(1 << 20));
-            text = try setting(allocator, text, "server_port", try std.fmt.allocPrint(allocator, "{d}", .{options.port}));
+            text = try setting(allocator, text, "server_port", try std.fmt.allocPrint(allocator, "{d}", .{config.port}));
             text = try setting(allocator, text, "max_players", try std.fmt.allocPrint(allocator, "{d}", .{@max(20, options.players + 1)}));
             text = try setting(allocator, text, "view_distance", try std.fmt.allocPrint(allocator, "{d}", .{scenario.view_distance}));
             text = try setting(allocator, text, "simulation_distance", try std.fmt.allocPrint(allocator, "{d}", .{scenario.view_distance}));
@@ -332,7 +353,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             text = try setting(allocator, text, "allow_flight", "true");
             text = try setting(allocator, text, "use_favicon", "false");
             text = try setting(allocator, text, "threshold", "256");
-            try cwd.writeFile(io, .{ .sub_path = try path(allocator, config, "config.toml"), .data = text });
+            try cwd.writeFile(io, .{ .sub_path = try path(allocator, config_directory, "config.toml"), .data = text });
             // SteelMC reads no vanilla worlds, so on real terrain it generates the same seed.
             const world = if (flat)
                 \\generator = "minecraft:flat"
@@ -347,7 +368,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\default = true
                 \\
             ;
-            try cwd.writeFile(io, .{ .sub_path = try path(allocator, config, "worlds.toml"), .data = try std.fmt.allocPrint(allocator,
+            try cwd.writeFile(io, .{ .sub_path = try path(allocator, config_directory, "worlds.toml"), .data = try std.fmt.allocPrint(allocator,
                 \\save_path = "saves"
                 \\seed = "{s}"
                 \\default_gamemode = "creative"
@@ -371,6 +392,39 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
 }
 
 /// Copies a directory tree, sharing extents where the filesystem can.
+/// Links the vanilla jar Paper patched and the libraries it fetched in setup, which it would
+/// otherwise rebuild in every fresh directory, and writes its anti-xray settings. Paper fills in
+/// every setting left out.
+fn preparePaper(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
+    const cwd = std.Io.Dir.cwd();
+    for ([_][]const u8{ "cache", "libraries", "versions" }) |name| {
+        const target = try std.fs.path.join(allocator, &.{ options.root, "servers/paper", name });
+        cwd.access(io, target, .{}) catch return error.MissingPaperSetup;
+        try cwd.symLink(io, target, try std.fs.path.join(allocator, &.{ options.directory, name }), .{ .is_directory = true });
+    }
+    const anti_xray = switch (options.kind) {
+        .paper => return,
+        // The overworld settings Paper's anti-xray guide recommends for each mode.
+        .@"paper-antixray-1" =>
+        \\anticheat:
+        \\  anti-xray:
+        \\    enabled: true
+        \\    engine-mode: 1
+        \\    max-block-height: 64
+        \\    update-radius: 2
+        \\    lava-obscures: false
+        \\    use-permission: false
+        \\    hidden-blocks: [chest, coal_ore, deepslate_coal_ore, copper_ore, deepslate_copper_ore, raw_copper_block, diamond_ore, deepslate_diamond_ore, emerald_ore, deepslate_emerald_ore, gold_ore, deepslate_gold_ore, iron_ore, deepslate_iron_ore, raw_iron_block, lapis_ore, deepslate_lapis_ore, redstone_ore, deepslate_redstone_ore]
+        \\    replacement-blocks: []
+        \\
+        ,
+        else => unreachable,
+    };
+    const config_directory = try std.fs.path.join(allocator, &.{ options.directory, "config" });
+    try cwd.createDirPath(io, config_directory);
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ config_directory, "paper-world-defaults.yml" }), .data = anti_xray });
+}
+
 fn copy(allocator: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8) !void {
     std.Io.Dir.cwd().access(io, from, .{}) catch return error.MissingPregeneratedWorld;
     const result = try std.process.run(allocator, io, .{ .argv = &.{ "cp", "-r", "--reflink=auto", from, to } });

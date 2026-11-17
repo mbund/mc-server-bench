@@ -1,0 +1,40 @@
+diff --git a/steel/src/logger/input.rs b/steel/src/logger/input.rs
+index e185b7174..a8c5d6443 100644
+--- a/steel/src/logger/input.rs
++++ b/steel/src/logger/input.rs
+@@ -11,7 +11,7 @@ use crossterm::{
+ use std::time::Duration;
+ use std::{
+     fmt::Write as _,
+-    io::{Result, Write},
++    io::{IsTerminal, Result, Write},
+     sync::Arc,
+ };
+ use steel_core::command::sender::CommandSender;
+@@ -29,6 +29,26 @@ enum ExtendedKey {
+ impl CommandLogger {
+     /// Main entry of the input process
+     pub async fn input_main(self: Arc<Self>) -> Result<()> {
++        // Piped input has no key events, so each line is a command, as Enter would submit it.
++        // A detached thread reads it, as a blocking task would hold shutdown until the pipe closes.
++        if !std::io::stdin().is_terminal() {
++            std::thread::spawn(|| {
++                for line in std::io::stdin().lines() {
++                    let Ok(line) = line else { break };
++                    if line.trim().is_empty() {
++                        continue;
++                    }
++                    if let Some(server) = SERVER.get()
++                        && server.submit_command(CommandSender::Console, line).is_err()
++                    {
++                        log::warn!("Command queue is full");
++                    }
++                }
++            });
++            self.cancel_token.cancelled().await;
++            self.stopped.cancel();
++            return Ok(());
++        }
+         let (tx, rx) = mpsc::unbounded_channel();
+         enable_raw_mode()?;
+         Arc::clone(&self).input_receiver(tx);
