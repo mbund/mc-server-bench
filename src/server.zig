@@ -321,7 +321,13 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 if (byte == ':') try escaped.append(allocator, '\\');
                 try escaped.append(allocator, byte);
             }
-            const world = if (flat) try std.fmt.allocPrint(allocator, "level-type=minecraft\\:flat\ngenerator-settings={s}\ngenerate-structures=false\n", .{escaped.items}) else try std.fmt.allocPrint(allocator, "level-seed={s}\n", .{terrain_seed});
+            // Generating the real terrain loads a thousand chunks at once, and a tick waiting on them
+            // can pass the minute after which vanilla's watchdog stops the server. It is not
+            // measured, so the watchdog is off then.
+            const world = if (flat)
+                try std.fmt.allocPrint(allocator, "level-type=minecraft\\:flat\ngenerator-settings={s}\ngenerate-structures=false\n", .{escaped.items})
+            else
+                try std.fmt.allocPrint(allocator, "level-seed={s}\n{s}", .{ terrain_seed, if (options.terrain == .generate) "max-tick-time=-1\n" else "" });
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "server.properties"), .data = try std.fmt.allocPrint(allocator,
                 \\online-mode=false
                 \\enforce-secure-profile=false
