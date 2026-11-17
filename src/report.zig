@@ -1,14 +1,17 @@
-//! Writes the results of sweeps as one Markdown file: the servers and machines measured, then a
-//! table for every terrain, scenario and player count with a row per server.
+//! Writes the results of sweeps as one Markdown file: the servers measured, then for every terrain
+//! and scenario its machine, its charts over player counts and a table for every player count with
+//! a row per server.
 
 const std = @import("std");
 const server_module = @import("server.zig");
 const scenario = @import("scenario.zig");
+const charts = @import("charts.zig");
 
 const Object = std.json.ObjectMap;
 
-pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8) !void {
+pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, chart_urls: ?[]const u8) !void {
     const cwd = std.Io.Dir.cwd();
+    const urls = if (chart_urls) |path| try cwd.readFileAlloc(io, path, allocator, .limited(1 << 20)) else "";
     const lines = try cwd.readFileAlloc(io, try std.fs.path.join(allocator, &.{ directory, "results.jsonl" }), allocator, .limited(1 << 30));
     var runs: std.ArrayList(Object) = .empty;
     var each = std.mem.tokenizeScalar(u8, lines, '\n');
@@ -69,7 +72,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8) !v
         std.mem.sort(u64, counts.items, {}, std.sort.asc(u64));
         try writer.print("## {s} terrain, {s}\n\n{s}\n\n", .{ terrainName(terrain), @tagName(kind), description(kind) });
         try machines(allocator, writer, runs.items, terrain, kind);
-        if (counts.items.len > 1) for (charts) |chart| try barChart(allocator, writer, runs.items, terrain, kind, counts.items, chart);
+        if (counts.items.len > 1) try chartSection(allocator, io, writer, directory, urls, runs.items, terrain, kind, counts.items);
         for (counts.items) |players| try table(writer, runs.items, terrain, kind, players);
     };
     const path = try std.fs.path.join(allocator, &.{ directory, "report.md" });
@@ -96,60 +99,45 @@ fn machines(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const 
     try writer.writeAll("\n\n");
 }
 
-const Chart = struct {
-    title: []const u8,
-    unit: []const u8,
-    path: []const []const u8,
-    /// Whether the value counts only where the server reports its own tick times.
-    reported: bool = false,
-};
-
-const charts = [_]Chart{
-    .{ .title = "CPU ms per tick", .unit = "ms", .path = &.{ "window", "cpu_ms_per_tick" } },
-    .{ .title = "Mean mspt", .unit = "ms", .path = &.{ "window", "mspt", "mean_ms" }, .reported = true },
-    .{ .title = "KB/s received per player", .unit = "KB/s", .path = &.{ "window", "received_kb_per_s_per_player" } },
-    .{ .title = "Peak RAM", .unit = "MB", .path = &.{"peak_rss_mb"} },
-};
-
-/// A Mermaid bar chart of one measure, which GitHub draws in Markdown: a bar for every server at
-/// every player count, grouped by server, so each group shows how the server grows with players.
-/// Each bar's label names its server, count and value, so no bar is told by color alone and a
-/// value too small to see beside a large one is still read. Measures of different units never
-/// share a chart. A server not reporting the measure has no bars, and the chart says so.
-fn barChart(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, counts: []const u64, chart: Chart) !void {
-    var labels: std.ArrayList(u8) = .empty;
-    var values: std.ArrayList(u8) = .empty;
-    var silent: std.ArrayList(u8) = .empty;
-    var bars: usize = 0;
-    for (std.enums.values(server_module.Kind)) |server| {
-        var present = false;
-        var reported = false;
-        for (counts) |players| {
-            const run = latest(runs, server, terrain, kind, players) orelse continue;
-            present = true;
-            if (chart.reported and std.mem.eql(u8, text(run, &.{ "window", "mspt", "source" }), "none")) continue;
-            reported = true;
-            const value = number(run, chart.path);
-            try labels.print(allocator, "{s}\"{s} {d} ({d:.1})\"", .{ if (bars == 0) "" else ", ", @tagName(server), players, value });
-            try values.print(allocator, "{s}{d:.2}", .{ if (bars == 0) "" else ", ", value });
-            bars += 1;
+/// Draws a scenario's charts into the report's charts directory and links them. The link is the
+/// URL a `name url` line of the chart URLs gives for the file, as CI uploads each chart to a page
+/// of its own, or else the file beside the report.
+fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, directory: []const u8, urls: []const u8, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, counts: []const u64) !void {
+    var panels: std.ArrayList(charts.Panel) = .empty;
+    for (charts.measures) |measure| {
+        var series: std.ArrayList(charts.Series) = .empty;
+        for (std.enums.values(server_module.Kind)) |server| {
+            const values = try allocator.alloc(?f64, counts.len);
+            var any = false;
+            for (counts, values) |players, *value| {
+                value.* = null;
+                const run = latest(runs, server, terrain, kind, players) orelse continue;
+                if (measure.reported and std.mem.eql(u8, text(run, &.{ "window", "mspt", "source" }), "none")) continue;
+                const measured = number(run, measure.path);
+                // A log scale has no place for zero.
+                if (measured <= 0) continue;
+                value.* = measured;
+                any = true;
+            }
+            if (any) try series.append(allocator, .{ .server = server, .values = values });
         }
-        if (present and !reported) try silent.print(allocator, "{s}{s}", .{ if (silent.items.len == 0) "" else ", ", @tagName(server) });
+        try panels.append(allocator, .{ .measure = measure, .series = series.items });
     }
-    if (bars == 0) return;
-    try writer.print(
-        \\```mermaid
-        \\%%{{init: {{"xyChart": {{"width": 720, "height": {d}}}, "themeVariables": {{"xyChart": {{"plotColorPalette": "#3987e5"}}}}}}}}%%
-        \\xychart-beta horizontal
-        \\    title "{s}"
-        \\    x-axis [{s}]
-        \\    y-axis "{s}"
-        \\    bar [{s}]
-        \\```
-        \\
-        \\
-    , .{ 80 + 22 * bars, chart.title, labels.items, chart.unit, values.items });
-    if (silent.items.len != 0) try writer.print("No bars for {s}, which report no tick times of their own.\n\n", .{silent.items});
+    const name = try std.fmt.allocPrint(allocator, "{s}-{s}.svg", .{ @tagName(terrain), @tagName(kind) });
+    const title = try std.fmt.allocPrint(allocator, "{s} terrain, {s}", .{ terrainName(terrain), @tagName(kind) });
+    const image = try charts.svg(allocator, title, counts, panels.items);
+    const folder = try std.fs.path.join(allocator, &.{ directory, "charts" });
+    try std.Io.Dir.cwd().createDirPath(io, folder);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ folder, name }), .data = image });
+    var link = try std.fmt.allocPrint(allocator, "charts/{s}", .{name});
+    var lines = std.mem.tokenizeScalar(u8, urls, '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        if (!std.mem.eql(u8, fields.next() orelse continue, name)) continue;
+        link = @constCast(fields.next() orelse continue);
+    }
+    try writer.print("![{s}: CPU time, tick time, traffic and memory by player count, on log scales]({s})\n\n", .{ title, link });
+    try writer.writeAll("Log scales, so a server using a hundred times more than another reads as clearly as one using twice as much. A gap in a line is a player count without a result, and a server with no tick times of its own has no mspt line.\n\n");
 }
 
 fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, players: u64) !void {

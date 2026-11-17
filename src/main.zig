@@ -43,8 +43,9 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 2) return usage();
     const verb = args[1];
     if (std.mem.eql(u8, verb, "report")) {
-        if (args.len != 3) return usage();
-        return report.write(allocator, init.io, args[2]);
+        if (args.len != 3 and args.len != 4) return usage();
+        const urls = if (args.len == 4) (if (std.mem.startsWith(u8, args[3], "--chart-urls=")) args[3]["--chart-urls=".len..] else return usage()) else null;
+        return report.write(allocator, init.io, args[2], urls);
     }
     var settings: Settings = .{};
     for (args[2..]) |argument| try parseOption(allocator, &settings, argument);
@@ -103,7 +104,7 @@ fn usage() error{InvalidArguments} {
         \\usage:
         \\  bench run --server=<name> --scenario=<name> --players=<count> [options]
         \\  bench sweep --servers=a,b --scenarios=a,b --players=1,2,5 [options]
-        \\  bench report <directory>
+        \\  bench report <directory> [--chart-urls=<file of "name url" lines>]
         \\  bench pregen [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate the real terrain world with vanilla, or add a dimension to it
         \\servers: vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion

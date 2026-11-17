@@ -144,17 +144,37 @@ jobs:
           merge-multiple: true
       - run: for archive in *.tar.gz; do tar -xzf "$archive"; done
       - run: MC_SERVER_BENCH_BUILT=1 ./run.sh --scenarios=${{ matrix.scenario }}
+      # The report and its charts for the runs that finished, when the sweep stopped early.
+      - if: failure()
+        run: test ! -f runs/standard/results.jsonl || ./zig-out/bin/bench report runs/standard
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: results-${{ matrix.scenario }}
           path: runs/standard/results.jsonl
           if-no-files-found: ignore
+      # Each chart unzipped, as an artifact of its own named after its file, so the report can
+      # show it as an image.
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          path: runs/standard/charts/real-${{ matrix.scenario }}.svg
+          archive: false
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          path: runs/standard/charts/flat-${{ matrix.scenario }}.svg
+          archive: false
+          if-no-files-found: ignore
 
   report:
     needs: bench
     if: always()
     runs-on: ubuntu-latest
+    # To find the charts the scenario jobs uploaded.
+    permissions:
+      actions: read
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -163,11 +183,16 @@ jobs:
         with:
           pattern: results-*
           path: results
-      - run: |
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
           tar -xzf harness.tar.gz
           mkdir -p runs/standard
           cat results/*/results.jsonl > runs/standard/results.jsonl
-          ./zig-out/bin/bench report runs/standard
+          # The page of every chart, which the report shows as an image.
+          gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --jq '.artifacts[] | select(.name | endswith(".svg")) | "\(.name) ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/\(.id)"' > chart-urls.txt
+          ./zig-out/bin/bench report runs/standard --chart-urls=chart-urls.txt
           cat runs/standard/report.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
@@ -175,3 +200,4 @@ jobs:
           path: |
             runs/standard/report.md
             runs/standard/results.jsonl
+            runs/standard/charts
