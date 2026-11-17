@@ -1,5 +1,5 @@
 diff --git a/steel/src/logger/input.rs b/steel/src/logger/input.rs
-index e185b7174..a8c5d6443 100644
+index e185b7174..eca354613 100644
 --- a/steel/src/logger/input.rs
 +++ b/steel/src/logger/input.rs
 @@ -11,7 +11,7 @@ use crossterm::{
@@ -11,7 +11,7 @@ index e185b7174..a8c5d6443 100644
      sync::Arc,
  };
  use steel_core::command::sender::CommandSender;
-@@ -29,6 +29,26 @@ enum ExtendedKey {
+@@ -29,6 +29,27 @@ enum ExtendedKey {
  impl CommandLogger {
      /// Main entry of the input process
      pub async fn input_main(self: Arc<Self>) -> Result<()> {
@@ -24,10 +24,11 @@ index e185b7174..a8c5d6443 100644
 +                    if line.trim().is_empty() {
 +                        continue;
 +                    }
-+                    if let Some(server) = SERVER.get()
-+                        && server.submit_command(CommandSender::Console, line).is_err()
-+                    {
-+                        log::warn!("Command queue is full");
++                    let Some(server) = SERVER.get() else { continue };
++                    // The command queue is bounded, so a burst of lines waits for room, as typing
++                    // would, rather than losing commands.
++                    while server.submit_command(CommandSender::Console, line.clone()).is_err() {
++                        std::thread::sleep(Duration::from_millis(1));
 +                    }
 +                }
 +            });
