@@ -34,7 +34,7 @@ fi
 # The real terrain world, which vanilla generates once from a fixed seed and every server but
 # SteelMC reads. SteelMC reads no vanilla worlds and generates the same seed itself.
 if wants terrain vanilla lightning-rod pumpkin paper paper-antixray-1 fabric fabric-occlusion && [ ! -d "$build/terrain/vanilla/world" ]; then
-  ./zig-out/bin/bench pregen --radius=64
+  ./zig-out/bin/bench pregen
 fi
 
 # Pumpkin reads flat layers only from vanilla's world generation settings, so vanilla makes them

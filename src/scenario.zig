@@ -84,6 +84,12 @@ pub fn spreadTarget(bot: *const Bot) [3]f64 {
     return .{ bot.origin[0] + @cos(angle) * radius, cruise_altitude, bot.origin[2] + @sin(angle) * radius };
 }
 
+/// Blocks from spawn to the far edge of the farthest view in `spread`.
+pub fn spreadReach(count: usize) f64 {
+    const radius = @as(f64, spread_spacing) / @sqrt(std.math.pi) * @sqrt(@as(f64, @floatFromInt(count)));
+    return radius + (view_distance + 1) * 16;
+}
+
 fn spread(bot: *Bot, count: usize) !void {
     _ = count;
     if (!try rise(bot)) return;

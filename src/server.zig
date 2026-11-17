@@ -270,8 +270,8 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
         .vanilla => try allocator.dupe([]const u8, &.{
             "java", "-Xmx4G", try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/vanilla/server.jar" }), "--nogui",
         }),
-        // Configured in code with the bench's settings, so it takes no flags.
-        .@"lightning-rod" => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/build/lightning-rod/bin/lightning_rod" })}),
+        // Configured in code with the bench's settings, and takes only the room for players.
+        .@"lightning-rod" => try allocator.dupe([]const u8, &.{ try std.fs.path.join(allocator, &.{ root, "servers/build/lightning-rod/bin/lightning_rod" }), try std.fmt.allocPrint(allocator, "{d}", .{config.maxPlayers(options.players)}) }),
         // Vanilla's jar unpacks where the vanilla runs unpack it, and the launcher finds its
         // libraries beside itself.
         .fabric, .@"fabric-occlusion" => try allocator.dupe([]const u8, &.{
@@ -320,7 +320,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\max-players={d}
                 \\allow-flight=true
                 \\
-            , .{ config.port, world, scenario.view_distance, scenario.view_distance, @max(20, options.players + 1) }) });
+            , .{ config.port, world, scenario.view_distance, scenario.view_distance, config.maxPlayers(options.players) }) });
             if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/vanilla/world"), try path(allocator, options.directory, "world"));
         },
         .@"lightning-rod" => {
@@ -349,7 +349,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\[networking.bedrock]
                 \\enabled = false
                 \\
-            , .{ terrain_seed, config.port, @max(20, options.players + 1), scenario.view_distance, scenario.view_distance }) });
+            , .{ terrain_seed, config.port, config.maxPlayers(options.players), scenario.view_distance, scenario.view_distance }) });
             if (flat) {
                 // Pumpkin takes its flat layers from vanilla's world generation settings.
                 const data = try path(allocator, options.directory, "world/data/minecraft");
@@ -363,7 +363,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             // SteelMC wants every setting, so its own defaults are the base and only ours change.
             var text = try cwd.readFileAlloc(io, try path(allocator, options.root, "servers/steel/package-content/config.toml"), allocator, .limited(1 << 20));
             text = try setting(allocator, text, "server_port", try std.fmt.allocPrint(allocator, "{d}", .{config.port}));
-            text = try setting(allocator, text, "max_players", try std.fmt.allocPrint(allocator, "{d}", .{@max(20, options.players + 1)}));
+            text = try setting(allocator, text, "max_players", try std.fmt.allocPrint(allocator, "{d}", .{config.maxPlayers(options.players)}));
             text = try setting(allocator, text, "view_distance", try std.fmt.allocPrint(allocator, "{d}", .{scenario.view_distance}));
             text = try setting(allocator, text, "simulation_distance", try std.fmt.allocPrint(allocator, "{d}", .{scenario.view_distance}));
             text = try setting(allocator, text, "online_mode", "false");

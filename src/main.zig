@@ -32,7 +32,7 @@ pub const Settings = struct {
     /// The terrain of the run being measured, one of `terrains`.
     terrain: server_module.Terrain = .flat,
     /// Chunks out from the centre that `pregen` generates.
-    radius: i32 = 64,
+    radius: i32 = config.terrain_radius,
     /// Another dimension for `pregen` to generate into the existing world, like minecraft:the_nether.
     dimension: ?[]const u8 = null,
 };
@@ -72,6 +72,10 @@ pub fn main(init: std.process.Init) !void {
     for (settings.terrains) |terrain| for (settings.scenarios) |kind| for (settings.players) |players| for (settings.servers) |server| {
         // Bots on real terrain fly above it, and only the pregenerated area is the same everywhere.
         if (terrain == .real and (kind == .build or kind == .explore)) continue;
+        if (terrain == .real and kind == .spread and scenario.spreadReach(players) > config.terrain_radius * 16) {
+            std.log.info("skipping {s} spread on real terrain with {d} players, whose views reach past the pregenerated area", .{ @tagName(server), players });
+            continue;
+        }
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         var run_settings = settings;

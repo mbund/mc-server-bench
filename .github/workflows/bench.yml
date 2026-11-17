@@ -22,7 +22,7 @@ jobs:
           path: |
             servers/build/terrain/vanilla
             servers/build/flat
-          key: terrain-${{ hashFiles('setup.sh', 'src/main.zig', 'src/server.zig') }}
+          key: terrain-${{ hashFiles('setup.sh', 'src/main.zig', 'src/server.zig', 'src/config.zig') }}
       - if: steps.cache.outputs.cache-hit != 'true'
         run: ./setup.sh terrain
       - uses: actions/upload-artifact@v4
