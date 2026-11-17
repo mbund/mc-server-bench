@@ -80,7 +80,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # What setup.sh builds, the inputs that decide the build, and what the runs need of it.
+          # What setup.sh builds, the files that decide the build, and what the runs need of it.
+          # Pumpkin and SteelMC depend on only their own part of setup.sh, its section. A build is
+          # reused for as long as its submodule commit and these stay the same.
           - name: lightning-rod
             targets: lightning-rod
             submodules: lightning-rod
@@ -89,12 +91,13 @@ jobs:
           - name: pumpkin
             targets: pumpkin
             submodules: pumpkin
-            inputs: setup.sh
+            section: pumpkin
             outputs: servers/pumpkin/target/release/pumpkin servers/build/versions/pumpkin
           - name: steel
             targets: steel
             submodules: steel
-            inputs: setup.sh patches/steel-console-stdin.patch
+            section: steel
+            inputs: patches/steel-console-stdin.patch
             outputs: servers/steel/target/release/steel servers/steel/package-content servers/build/versions/steel
           - name: java
             targets: vanilla paper paper-antixray-1 fabric fabric-occlusion
@@ -106,7 +109,7 @@ jobs:
       - id: key
         run: |
           commits=$(for name in ${{ matrix.submodules }}; do git rev-parse "HEAD:servers/$name"; done)
-          echo "key=build-${{ matrix.name }}-$( (echo "$commits"; cat ${{ matrix.inputs }}) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+          echo "key=build-${{ matrix.name }}-$( (echo "$commits"; cat /dev/null ${{ matrix.inputs }}; awk '/^if wants ${{ matrix.section }}; then/,/^fi$/' setup.sh) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
       - id: cache
         uses: actions/cache@v5
         with:
