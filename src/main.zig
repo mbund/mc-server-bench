@@ -26,6 +26,10 @@ pub const Settings = struct {
     join_interval_ms: u64 = 200,
     out: []const u8 = "runs/latest",
     keep_worlds: bool = false,
+    dump_frames: ?[]const u8 = null,
+    terrain: server_module.Terrain = .flat,
+    /// Chunks out from the centre that `pregen` generates.
+    radius: i32 = 64,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -39,10 +43,18 @@ pub fn main(init: std.process.Init) !void {
     }
     var settings: Settings = .{};
     for (args[2..]) |argument| try parseOption(allocator, &settings, argument);
+    if (std.mem.eql(u8, verb, "pregen")) {
+        return pregen(allocator, init.io, try std.process.currentPathAlloc(init.io, allocator), settings);
+    }
     if (std.mem.eql(u8, verb, "run")) {
         if (settings.servers.len != 1 or settings.scenarios.len != 1 or settings.players.len != 1) return usage();
     } else if (!std.mem.eql(u8, verb, "sweep")) return usage();
     if (settings.servers.len == 0 or settings.scenarios.len == 0 or settings.players.len == 0) return usage();
+    // Bots on real terrain fly above it, and only the pregenerated area is the same everywhere.
+    if (settings.terrain == .real) for (settings.scenarios) |kind| if (kind == .build or kind == .explore) {
+        std.log.err("{s} runs on flat terrain only", .{@tagName(kind)});
+        return error.InvalidArguments;
+    };
 
     // Bots keep to their own CPUs, apart from the server's.
     try process.pin(settings.bot_cpus);
@@ -76,10 +88,12 @@ fn usage() error{InvalidArguments} {
         \\  bench run --server=<name> --scenario=<name> --players=<count> [options]
         \\  bench sweep --servers=a,b --scenarios=a,b --players=1,2,5 [options]
         \\  bench report <directory>
+        \\  bench pregen [--radius=<chunks>]   generate the real terrain world with vanilla
         \\servers: vanilla lightning-rod pumpkin steel
         \\scenarios: idle wander spread explore build
         \\options: --warmup=<s> --seconds=<s> --port=<n> --server-cpus=<list> --bot-cpus=<list>
         \\         --bot-threads=<n> --join-interval=<ms> --out=<directory> --keep-worlds
+        \\         --dump-frames=<path prefix> --terrain=flat|real
     , .{});
     return error.InvalidArguments;
 }
@@ -113,6 +127,13 @@ fn parseOption(allocator: std.mem.Allocator, settings: *Settings, argument: []co
         settings.join_interval_ms = try std.fmt.parseInt(u64, value, 10);
     } else if (std.mem.eql(u8, name, "--out")) {
         settings.out = value;
+    } else if (std.mem.eql(u8, name, "--terrain")) {
+        settings.terrain = std.meta.stringToEnum(server_module.Terrain, value) orelse return error.InvalidArguments;
+        if (settings.terrain == .generate) return error.InvalidArguments;
+    } else if (std.mem.eql(u8, name, "--radius")) {
+        settings.radius = try std.fmt.parseInt(i32, value, 10);
+    } else if (std.mem.eql(u8, name, "--dump-frames")) {
+        settings.dump_frames = value;
     } else if (std.mem.eql(u8, name, "--keep-worlds")) {
         settings.keep_worlds = true;
     } else {
@@ -182,6 +203,7 @@ pub const Window = struct {
 
 pub const Result = struct {
     server: []const u8,
+    terrain: []const u8,
     scenario: []const u8,
     players: usize,
     started_unix_s: i64,
@@ -290,12 +312,12 @@ const Run = struct {
 };
 
 fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings, kind: server_module.Kind, scenario_kind: scenario.Kind, players: usize) !Result {
-    const directory = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}/{d}", .{ settings.out, @tagName(scenario_kind), @tagName(kind), players });
+    const directory = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}/{s}/{d}", .{ settings.out, @tagName(settings.terrain), @tagName(scenario_kind), @tagName(kind), players });
     std.Io.Dir.cwd().deleteTree(io, directory) catch {};
     const metrics = try std.fmt.allocPrint(allocator, "/dev/shm/mc-server-bench-{d}", .{linux.getpid()});
     std.Io.Dir.cwd().deleteTree(io, metrics) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, metrics) catch {};
-    var result: Result = .{ .server = @tagName(kind), .scenario = @tagName(scenario_kind), .players = players, .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(), .startup_s = 0 };
+    var result: Result = .{ .server = @tagName(kind), .terrain = @tagName(settings.terrain), .scenario = @tagName(scenario_kind), .players = players, .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(), .startup_s = 0 };
     var problems: std.ArrayList([]const u8) = .empty;
 
     if (bot.probe(settings.port)) return error.PortInUse;
@@ -308,6 +330,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         .players = players,
         .cpus = settings.server_cpus,
         .metrics = metrics,
+        .terrain = settings.terrain,
     });
     var stopped = false;
     defer if (!stopped) {
@@ -321,7 +344,15 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     result.startup_s = seconds(now() - launched);
     try server.configure();
 
-    const swarm = try bot.Swarm.init(allocator, .{ .port = settings.port, .kind = scenario_kind, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms }, players, settings.bot_threads);
+    var dump: ?linux.fd_t = null;
+    if (settings.dump_frames) |base| {
+        const path = try std.fmt.allocPrintSentinel(allocator, "{s}-{s}-{s}-{d}.bin", .{ base, @tagName(kind), @tagName(scenario_kind), players }, 0);
+        dump = @intCast(linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644));
+    }
+    defer if (dump) |fd| {
+        _ = linux.close(fd);
+    };
+    const swarm = try bot.Swarm.init(allocator, .{ .port = settings.port, .kind = scenario_kind, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump }, players, settings.bot_threads);
     var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched };
     try swarm.start();
     var swarm_stopped = false;
@@ -683,4 +714,71 @@ fn traffic(allocator: std.mem.Allocator, swarm: *bot.Swarm) !TrafficSummary {
     }.heavier);
     summary.packets = packets.items;
     return summary;
+}
+
+/// Generates the real terrain world once with vanilla: a square of chunks around the centre,
+/// loaded a few hundred at a time until generation goes quiet, then saved.
+fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings) !void {
+    const directory = "servers/build/terrain/vanilla";
+    std.Io.Dir.cwd().deleteTree(io, directory) catch {};
+    if (bot.probe(settings.port)) return error.PortInUse;
+    const server = try Server.start(allocator, io, .{
+        .kind = .vanilla,
+        .root = root,
+        .directory = directory,
+        .port = settings.port,
+        .players = 1,
+        .cpus = settings.server_cpus,
+        .metrics = "",
+        .terrain = .generate,
+    });
+    var stopped = false;
+    defer if (!stopped) {
+        _ = server.stop(60) catch {};
+    };
+    while (!bot.probe(settings.port)) {
+        if (server.exited.load(.acquire)) return error.ServerExited;
+        try io.sleep(.fromMilliseconds(200), .awake);
+    }
+    // Forceload takes at most 256 chunks a command, so the square goes in tiles of 16 by 16.
+    const tiles = @divFloor(settings.radius + 15, 16);
+    const batch = 4;
+    var pending: usize = 0;
+    var tile_x = -tiles;
+    while (tile_x < tiles) : (tile_x += 1) {
+        var tile_z = -tiles;
+        while (tile_z < tiles) : (tile_z += 1) {
+            const x = tile_x * 256;
+            const z = tile_z * 256;
+            try server.console(try std.fmt.allocPrint(allocator, "forceload add {d} {d} {d} {d}", .{ x, z, x + 255, z + 255 }));
+            pending += 1;
+            if (pending == batch or (tile_x == tiles - 1 and tile_z == tiles - 1)) {
+                try quiet(io, server);
+                try server.console("forceload remove all");
+                pending = 0;
+                std.log.info("generated through tile {d}, {d}", .{ tile_x, tile_z });
+            }
+        }
+    }
+    try server.console("save-all flush");
+    try quiet(io, server);
+    const ending = try server.stop(600);
+    stopped = true;
+    if (!ending.clean) return error.ServerKilled;
+    std.log.info("world of {d:.0} MB in {s}/world", .{ megabytes(try diskUsage(allocator, io, directory ++ "/world")), directory });
+}
+
+/// Waits until the server keeps under half a core for three seconds running.
+fn quiet(io: std.Io, server: *Server) !void {
+    var calm: usize = 0;
+    var previous = try process.sample(server.pid);
+    for (0..1800) |_| {
+        try io.sleep(.fromSeconds(1), .awake);
+        if (server.exited.load(.acquire)) return error.ServerExited;
+        const now_usage = try process.sample(server.pid);
+        calm = if (now_usage.cpu_ns - previous.cpu_ns < std.time.ns_per_s / 2) calm + 1 else 0;
+        previous = now_usage;
+        if (calm == 3) return;
+    }
+    return error.GenerationNeverSettled;
 }

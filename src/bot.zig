@@ -260,6 +260,12 @@ pub const Bot = struct {
 
     fn frame(self: *Bot, worker: *Worker, raw: []const u8) !void {
         self.counters.add(.packets_in, 1);
+        if (self.index == 0 and self.phase.load(.monotonic) == .play) if (worker.swarm.config.dump) |fd| {
+            var size: [4]u8 = undefined;
+            std.mem.writeInt(u32, &size, @intCast(raw.len), .little);
+            _ = linux.write(fd, &size, 4);
+            _ = linux.write(fd, raw.ptr, raw.len);
+        };
         var body = raw;
         if (self.compressed) {
             const length, const prefix = try readVarint(raw);
@@ -532,6 +538,9 @@ pub const Configuration = struct {
     kind: scenario.Kind,
     /// Time between two bots starting to join.
     join_interval_ns: u64,
+    /// A file the first bot appends every frame it gets in play to, as a little endian length
+    /// and the frame as it crossed the wire, for looking at what servers send.
+    dump: ?linux.fd_t = null,
 };
 
 /// The bots of one thread and the scratch they share.

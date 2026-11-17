@@ -55,3 +55,13 @@ EOF
 fi
 
 zig build -Doptimize=ReleaseSafe
+
+# The real terrain world: vanilla generates it once from a fixed seed, and Lightning Rod imports
+# it with its caches built, as vanilla saves its light with the chunks.
+if [ ! -d "$build/terrain/vanilla/world" ]; then
+  ./zig-out/bin/bench pregen --radius=64
+fi
+if [ ! -d "$build/terrain/lightning-rod" ]; then
+  (cd servers/lightning-rod/tools/world-import && zig build -Doptimize=ReleaseSafe -p "$build/world-import")
+  "$build/world-import/bin/world-import" --input "$build/terrain/vanilla/world" --output "$build/terrain/lightning-rod" --skip-unsupported --prewarm
+fi

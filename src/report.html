@@ -107,6 +107,7 @@ h3 { font-size: 15px; margin: 28px 0 8px; }
   <h1>Server benchmark</h1>
   <p class="lede" id="lede"></p>
   <div class="controls">
+    <div class="segmented" id="terrains" role="group" aria-label="Terrain" hidden></div>
     <div class="segmented" id="scenarios" role="group" aria-label="Scenario"></div>
     <div class="segmented" id="scales" role="group" aria-label="Scale">
       <button type="button" data-scale="linear" aria-pressed="true">Linear</button>
@@ -121,6 +122,7 @@ h3 { font-size: 15px; margin: 28px 0 8px; }
 </main>
 <script>
 const results = /*RESULTS*/[];
+for (const r of results) r.terrain ??= "flat";
 
 // Each server keeps its color whatever is shown.
 const servers = [
@@ -131,7 +133,7 @@ const servers = [
 ];
 const scenarios = {
   idle: "Everyone stands still at spawn.",
-  wander: "Everyone walks at random within 24 blocks of spawn, in sight of each other.",
+  wander: "Everyone flies at walking speed at random within 24 blocks of spawn, in sight of each other.",
   spread: "Everyone flies to a spot of their own, far enough apart that views never overlap, and hovers there.",
   explore: "Everyone flies outward at 20 blocks a second into terrain never generated before.",
   build: "Everyone places or breaks a block every tick at a spot of their own near spawn.",
@@ -150,11 +152,12 @@ const metrics = [
   { key: r => r.startup_s, title: "Startup", unit: "s", about: "From launch to answering a status ping" },
 ];
 
-let scenario = null;
 let scale = "linear";
+const terrains = ["flat", "real"].filter(t => results.some(r => r.terrain === t));
+let terrain = terrains[0] ?? "flat";
 const present = [...new Set(results.map(r => r.scenario))];
 const order = Object.keys(scenarios).filter(s => present.includes(s));
-scenario = order[0] ?? null;
+let scenario = order[0] ?? null;
 
 function format(value, unit) {
   if (value == null || !isFinite(value)) return "–";
@@ -299,7 +302,7 @@ function chart(card, metric, runs) {
 }
 
 function render() {
-  const runs = results.filter(r => r.scenario === scenario);
+  const runs = results.filter(r => r.scenario === scenario && r.terrain === terrain);
   document.getElementById("about").textContent = scenarios[scenario] ?? "";
   const charts = document.getElementById("charts");
   charts.replaceChildren();
@@ -353,6 +356,20 @@ function render() {
 }
 
 function controls() {
+  const terrainGroup = document.getElementById("terrains");
+  terrainGroup.hidden = terrains.length < 2;
+  for (const t of terrains) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = t === "flat" ? "flat world" : "real terrain";
+    button.setAttribute("aria-pressed", String(t === terrain));
+    button.addEventListener("click", () => {
+      terrain = t;
+      for (const b of terrainGroup.children) b.setAttribute("aria-pressed", String(b === button));
+      render();
+    });
+    terrainGroup.appendChild(button);
+  }
   const group = document.getElementById("scenarios");
   for (const s of order) {
     const button = document.createElement("button");
@@ -386,7 +403,7 @@ function controls() {
   const when = results.length ? new Date(Math.min(...results.map(r => r.started_unix_s)) * 1000) : null;
   const failed = results.filter(r => r.problems.length).length;
   document.getElementById("lede").textContent =
-    `${results.length} runs across ${shown.length} servers on Minecraft 26.2, each from a fresh flat world with view distance 10` +
+    `${results.length} runs across ${shown.length} servers on Minecraft 26.2, each from a fresh copy of its world with view distance 10` +
     (when ? `, measured ${when.toLocaleDateString()}` : "") +
     `. Hollow points mark runs where bots saw something wrong` + (failed ? ` (${failed} runs)` : "") + `.`;
 }

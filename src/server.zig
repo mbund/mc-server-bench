@@ -37,6 +37,19 @@ const flat_layers_json =
     \\{"layers":[{"block":"minecraft:stone","height":128},{"block":"minecraft:grass_block","height":1}],"biome":"minecraft:plains","structure_overrides":[]}
 ;
 
+pub const Terrain = enum {
+    /// Stone and grass, which every server generates alike.
+    flat,
+    /// A copy of one pregenerated vanilla world, the same for every server that reads vanilla
+    /// worlds.
+    real,
+    /// Vanilla generating that world from the seed, only for pregeneration.
+    generate,
+};
+
+/// A number, since servers hash text seeds differently.
+pub const terrain_seed = "8675309";
+
 pub const Options = struct {
     kind: Kind,
     /// The bench repository, where servers were built.
@@ -48,6 +61,7 @@ pub const Options = struct {
     cpus: []const u8,
     /// Where Lightning Rod writes its tick samples, off the disk being measured.
     metrics: []const u8,
+    terrain: Terrain = .flat,
 };
 
 /// A tick report, as vanilla's `tick query` prints it.
@@ -228,14 +242,17 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
             try std.fmt.allocPrint(allocator, "--view-distance={d}", .{scenario.view_distance}),
             try std.fmt.allocPrint(allocator, "--simulation-distance={d}", .{scenario.view_distance}),
             try std.fmt.allocPrint(allocator, "--metrics-directory={s}", .{options.metrics}),
+            // The TPS bossbar is a development overlay that sends to every player.
+            "--no-tps-bar",
         }),
         .pumpkin => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/pumpkin/target/release/pumpkin" })}),
         .steel => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/steel/target/release/steel" })}),
     };
 }
 
-/// Writes each server's settings: offline mode, creative, the flat world, the same view and
-/// simulation distance, no spawn protection, no pausing when empty and room for every bot.
+/// Writes each server's settings: offline mode, creative, the same view and simulation distance,
+/// no spawn protection, no pausing when empty and room for every bot. The world is the flat one
+/// every server generates alike, or a copy of the same pregenerated vanilla world.
 fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, options.directory);
@@ -244,6 +261,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             return std.fs.path.join(a, &.{ directory, name });
         }
     }.join;
+    const flat = options.terrain == .flat;
     switch (options.kind) {
         .vanilla => {
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "eula.txt"), .data = "eula=true\n" });
@@ -252,29 +270,34 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 if (byte == ':') try escaped.append(allocator, '\\');
                 try escaped.append(allocator, byte);
             }
+            const world = if (flat) try std.fmt.allocPrint(allocator, "level-type=minecraft\\:flat\ngenerator-settings={s}\ngenerate-structures=false\n", .{escaped.items}) else try std.fmt.allocPrint(allocator, "level-seed={s}\n", .{terrain_seed});
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "server.properties"), .data = try std.fmt.allocPrint(allocator,
                 \\online-mode=false
                 \\enforce-secure-profile=false
                 \\server-port={d}
                 \\gamemode=creative
-                \\level-type=minecraft\:flat
-                \\generator-settings={s}
-                \\generate-structures=false
-                \\spawn-protection=0
+                \\{s}spawn-protection=0
                 \\pause-when-empty-seconds=0
                 \\view-distance={d}
                 \\simulation-distance={d}
                 \\max-players={d}
                 \\allow-flight=true
                 \\
-            , .{ options.port, escaped.items, scenario.view_distance, scenario.view_distance, @max(20, options.players + 1) }) });
+            , .{ options.port, world, scenario.view_distance, scenario.view_distance, @max(20, options.players + 1) }) });
+            if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/vanilla/world"), try path(allocator, options.directory, "world"));
         },
-        .@"lightning-rod" => try cwd.createDirPath(io, options.metrics),
+        .@"lightning-rod" => {
+            try cwd.createDirPath(io, options.metrics);
+            // The import holds the world and the caches it prebuilt, as vanilla's region files
+            // hold its light.
+            if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/lightning-rod/."), options.directory);
+        },
         .pumpkin => {
             // Pumpkin reads its settings from the directory it runs in and fills in every one left
             // out with its default.
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "pumpkin.toml"), .data = try std.fmt.allocPrint(allocator,
                 \\default_gamemode = "Creative"
+                \\seed = "{s}"
                 \\
                 \\[networking.java]
                 \\address = "0.0.0.0:{d}"
@@ -287,11 +310,13 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\[networking.bedrock]
                 \\enabled = false
                 \\
-            , .{ options.port, @max(20, options.players + 1), scenario.view_distance, scenario.view_distance }) });
-            // Pumpkin takes its flat layers from vanilla's world generation settings.
-            const data = try path(allocator, options.directory, "world/data/minecraft");
-            try cwd.createDirPath(io, data);
-            try std.Io.Dir.copyFile(cwd, try path(allocator, options.root, "servers/build/flat/world_gen_settings.dat"), cwd, try path(allocator, data, "world_gen_settings.dat"), io, .{});
+            , .{ terrain_seed, options.port, @max(20, options.players + 1), scenario.view_distance, scenario.view_distance }) });
+            if (flat) {
+                // Pumpkin takes its flat layers from vanilla's world generation settings.
+                const data = try path(allocator, options.directory, "world/data/minecraft");
+                try cwd.createDirPath(io, data);
+                try std.Io.Dir.copyFile(cwd, try path(allocator, options.root, "servers/build/flat/world_gen_settings.dat"), cwd, try path(allocator, data, "world_gen_settings.dat"), io, .{});
+            } else if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/vanilla/world"), try path(allocator, options.directory, "world"));
         },
         .steel => {
             const config = try path(allocator, options.directory, "config");
@@ -308,9 +333,23 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             text = try setting(allocator, text, "use_favicon", "false");
             text = try setting(allocator, text, "threshold", "256");
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, config, "config.toml"), .data = text });
-            try cwd.writeFile(io, .{ .sub_path = try path(allocator, config, "worlds.toml"), .data =
+            // SteelMC reads no vanilla worlds, so on real terrain it generates the same seed.
+            const world = if (flat)
+                \\generator = "minecraft:flat"
+                \\default = true
+                \\
+                \\[domains.minecraft.worlds.config]
+                \\layers = [{ block = "minecraft:stone", height = 128 }, { block = "minecraft:grass_block", height = 1 }]
+                \\structure_overrides = []
+                \\
+            else
+                \\generator = "minecraft:overworld"
+                \\default = true
+                \\
+            ;
+            try cwd.writeFile(io, .{ .sub_path = try path(allocator, config, "worlds.toml"), .data = try std.fmt.allocPrint(allocator,
                 \\save_path = "saves"
-                \\seed = ""
+                \\seed = "{s}"
                 \\default_gamemode = "creative"
                 \\difficulty = "normal"
                 \\
@@ -325,16 +364,17 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\
                 \\[[domains.minecraft.worlds]]
                 \\name = "overworld"
-                \\generator = "minecraft:flat"
-                \\default = true
-                \\
-                \\[domains.minecraft.worlds.config]
-                \\layers = [{ block = "minecraft:stone", height = 128 }, { block = "minecraft:grass_block", height = 1 }]
-                \\structure_overrides = []
-                \\
-            });
+                \\{s}
+            , .{ terrain_seed, world }) });
         },
     }
+}
+
+/// Copies a directory tree, sharing extents where the filesystem can.
+fn copy(allocator: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8) !void {
+    std.Io.Dir.cwd().access(io, from, .{}) catch return error.MissingPregeneratedWorld;
+    const result = try std.process.run(allocator, io, .{ .argv = &.{ "cp", "-r", "--reflink=auto", from, to } });
+    if (result.term != .exited or result.term.exited != 0) return error.CopyFailed;
 }
 
 pub fn now() u64 {

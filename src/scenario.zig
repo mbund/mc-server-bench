@@ -11,8 +11,9 @@ pub const view_distance = 10;
 const flight_speed = 1.0;
 const walk_speed = 0.215;
 const travel_speed = 0.5;
-/// How high flying bots keep above the ground.
-const cruise_height = 16;
+/// The height flying bots climb to before moving across, above every peak vanilla generates,
+/// so no terrain is in their way.
+const cruise_altitude = 300;
 /// Blocks between neighbouring spots in `spread`: wider than a view, so views do not overlap.
 const spread_spacing = 2 * (view_distance + 1) * 16;
 /// How far wandering bots stray from spawn.
@@ -24,7 +25,8 @@ const golden_angle = std.math.pi * (3 - @sqrt(5.0));
 pub const Kind = enum {
     /// Everyone stands still at spawn.
     idle,
-    /// Everyone walks at random near spawn, in sight of the others.
+    /// Everyone moves at walking speed at random near spawn, in sight of the others, in flight so
+    /// no terrain is in their way.
     wander,
     /// Everyone flies to a spot of their own, far from the others, and stays there.
     spread,
@@ -60,6 +62,7 @@ pub fn step(kind: Kind, bot: *Bot, count: usize) !void {
 }
 
 fn wander(bot: *Bot) !void {
+    if (!try rise(bot)) return;
     const random = bot.random.random();
     if (bot.ticks % 40 == 0) bot.heading = random.float(f64) * std.math.tau;
     const dx = bot.position[0] - bot.origin[0];
@@ -78,12 +81,12 @@ pub fn spreadTarget(bot: *const Bot) [3]f64 {
     const index: f64 = @floatFromInt(bot.index + 1);
     const radius = @as(f64, spread_spacing) / @sqrt(std.math.pi) * @sqrt(index);
     const angle = index * golden_angle;
-    return .{ bot.origin[0] + @cos(angle) * radius, bot.origin[1] + cruise_height, bot.origin[2] + @sin(angle) * radius };
+    return .{ bot.origin[0] + @cos(angle) * radius, cruise_altitude, bot.origin[2] + @sin(angle) * radius };
 }
 
 fn spread(bot: *Bot, count: usize) !void {
     _ = count;
-    try bot.fly();
+    if (!try rise(bot)) return;
     const target = spreadTarget(bot);
     if (try travel(bot, target, flight_speed)) {
         // Hovering in place, as a still client does.
@@ -92,14 +95,10 @@ fn spread(bot: *Bot, count: usize) !void {
 }
 
 fn explore(bot: *Bot) !void {
-    try bot.fly();
+    if (!try rise(bot)) return;
     const angle = @as(f64, @floatFromInt(bot.index + 1)) * golden_angle;
-    if (bot.position[1] < bot.origin[1] + cruise_height) {
-        bot.position[1] = @min(bot.origin[1] + cruise_height, bot.position[1] + flight_speed);
-    } else {
-        bot.position[0] += @cos(angle) * flight_speed;
-        bot.position[2] += @sin(angle) * flight_speed;
-    }
+    bot.position[0] += @cos(angle) * flight_speed;
+    bot.position[2] += @sin(angle) * flight_speed;
     bot.yaw = yawOf(angle);
     try bot.move(true);
 }
@@ -155,4 +154,14 @@ fn travel(bot: *Bot, target: [3]f64, speed: f64) !bool {
 /// Minecraft's yaw for a heading in the horizontal plane: zero faces +z, ninety faces -x.
 fn yawOf(heading: f64) f32 {
     return @floatCast(std.math.radiansToDegrees(heading) - 90);
+}
+
+/// Starts flight and climbs straight up to the cruise altitude, reporting whether the bot is
+/// there.
+fn rise(bot: *Bot) !bool {
+    try bot.fly();
+    if (bot.position[1] >= cruise_altitude) return true;
+    bot.position[1] = @min(cruise_altitude, bot.position[1] + flight_speed);
+    try bot.move(false);
+    return false;
 }
