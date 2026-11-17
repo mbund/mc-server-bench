@@ -51,6 +51,8 @@ pub const Counter = enum {
     game_time_ns,
     joined_ns,
     spawned_ns,
+    /// When the bot had its first chunk.
+    first_chunk_ns,
     /// When the bot had the chunks of a full view around its spawn.
     viewed_ns,
     /// When the bot reached the place its scenario sends it to.
@@ -384,6 +386,7 @@ pub const Bot = struct {
         if (id == In.packetId(.map_chunk)) {
             self.counters.add(.chunks, 1);
             self.counters.add(.chunk_bytes, frame_bytes);
+            if (self.counters.get(.chunks) == 1) self.counters.mark(.first_chunk_ns, now());
             if (self.counters.get(.chunks) == scenario.viewChunks()) self.counters.mark(.viewed_ns, now());
         } else if (id == In.packetId(.chunk_batch_finished)) {
             var packet: Packet = .init(&buffer, Out.packetId(.chunk_batch_received));

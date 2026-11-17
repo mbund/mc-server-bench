@@ -246,7 +246,12 @@ pub const Result = struct {
     /// Cows summoned around the players, in the cows scenario.
     cows: usize = 0,
     started_unix_s: i64,
+    /// From launching the server to its first answer to a status request.
     startup_s: f64,
+    /// From launching the server to the first bot, logged in, holding its first chunk, and its
+    /// full render distance. The first bot joins as soon as the server answers.
+    first_chunk_s: f64 = 0,
+    full_view_s: f64 = 0,
     /// From the first bot connecting to the last one in play.
     join_s: f64 = 0,
     /// The median time from a bot entering play to it holding a full view.
@@ -474,6 +479,8 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     if (window.tps == 0) try problems.append(allocator, "no world time reached the bots, so ticks per second is unknown");
 
     result.view_s = try medianGap(allocator, swarm, .spawned_ns, .viewed_ns);
+    result.first_chunk_s = seconds(earliest(swarm, .first_chunk_ns) -| launched);
+    result.full_view_s = seconds(earliest(swarm, .viewed_ns) -| launched);
     result.bots = summarize(swarm);
     try check(allocator, swarm, scenario_kind, &problems);
 
@@ -551,6 +558,16 @@ fn summarize(swarm: *bot.Swarm) BotSummary {
         .packets_received = swarm.total(.packets_in),
         .packets_sent = swarm.total(.packets_out),
     };
+}
+
+/// The first time any bot reached a mark, or zero when none did.
+fn earliest(swarm: *bot.Swarm, counter: bot.Counter) u64 {
+    var value: u64 = std.math.maxInt(u64);
+    for (swarm.bots) |*each| {
+        const at = each.counters.get(counter);
+        if (at != 0) value = @min(value, at);
+    }
+    return if (value == std.math.maxInt(u64)) 0 else value;
 }
 
 fn latest(swarm: *bot.Swarm, counter: bot.Counter) u64 {

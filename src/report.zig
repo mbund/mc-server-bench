@@ -141,75 +141,96 @@ fn chartLink(allocator: std.mem.Allocator, charts_url: ?[]const u8, name: []cons
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ charts_url orelse "charts", name });
 }
 
-/// How long each server takes to start and how much it keeps on disk, which no player count
-/// changes. Both come from the idle runs alone, so the idle scenario's job draws the same chart
-/// from its own results as the report does from all of them.
+/// A measure of a server itself rather than of how it grows with players, taken from the idle
+/// runs: the median of all of them, or the one with the fewest players.
+const ServerMeasure = struct {
+    title: []const u8,
+    column: []const u8,
+    unit: []const u8,
+    path: []const []const u8,
+    median: bool,
+};
+
+const server_measures = [_]ServerMeasure{
+    .{ .title = "Status answered", .column = "Status", .unit = "s", .path = &.{"startup_s"}, .median = true },
+    .{ .title = "First chunk", .column = "First chunk", .unit = "s", .path = &.{"first_chunk_s"}, .median = true },
+    .{ .title = "Full render distance", .column = "Full view", .unit = "s", .path = &.{"full_view_s"}, .median = true },
+    .{ .title = "World on disk", .column = "World", .unit = "MB", .path = &.{"world_mb"}, .median = false },
+};
+
+/// How long each server takes to start, three ways, and how much it keeps on disk, which no player
+/// count changes. All come from the idle runs.
 fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, directory: []const u8, charts_url: ?[]const u8, runs: []const Object) !void {
     const terrains = [_]server_module.Terrain{ .flat, .real };
     comptime std.debug.assert(terrains.len == charts.terrains.len);
-    var startup: std.ArrayList(charts.Row) = .empty;
-    var world: std.ArrayList(charts.Row) = .empty;
-    for (std.enums.values(server_module.Kind)) |server| {
-        var started: charts.Row = .{ .server = server, .values = @splat(null) };
-        var kept: charts.Row = .{ .server = server, .values = @splat(null) };
-        for (terrains, 0..) |terrain, index| {
-            var samples: std.ArrayList(f64) = .empty;
-            // The world after the idle run with the fewest players, the least it can keep.
-            var fewest: ?Object = null;
-            for (runs) |run| {
-                if (!matches(run, terrain, .idle) or !std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) continue;
-                const seconds = number(run, &.{"startup_s"});
-                if (seconds > 0) try samples.append(allocator, seconds);
-                if (fewest == null or number(run, &.{"players"}) < number(fewest.?, &.{"players"})) fewest = run;
+    var panels: [server_measures.len]charts.DotPanel = undefined;
+    var any = false;
+    for (server_measures, &panels) |measure, *panel| {
+        var rows: std.ArrayList(charts.Row) = .empty;
+        for (std.enums.values(server_module.Kind)) |server| {
+            var row: charts.Row = .{ .server = server, .values = @splat(null) };
+            for (terrains, &row.values) |terrain, *value| {
+                var samples: std.ArrayList(f64) = .empty;
+                var fewest: ?Object = null;
+                for (runs) |run| {
+                    if (!matches(run, terrain, .idle) or !std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) continue;
+                    const measured = number(run, measure.path);
+                    if (measured > 0) try samples.append(allocator, measured);
+                    if (fewest == null or number(run, &.{"players"}) < number(fewest.?, &.{"players"})) fewest = run;
+                }
+                if (measure.median) {
+                    if (samples.items.len == 0) continue;
+                    std.mem.sort(f64, samples.items, {}, std.sort.asc(f64));
+                    value.* = samples.items[samples.items.len / 2];
+                } else if (fewest) |run| {
+                    const measured = number(run, measure.path);
+                    if (measured > 0) value.* = measured;
+                }
             }
-            if (samples.items.len != 0) {
-                std.mem.sort(f64, samples.items, {}, std.sort.asc(f64));
-                started.values[index] = samples.items[samples.items.len / 2];
-            }
-            if (fewest) |run| {
-                const megabytes = number(run, &.{"world_mb"});
-                if (megabytes > 0) kept.values[index] = megabytes;
-            }
+            if (row.values[0] != null or row.values[1] != null) try rows.append(allocator, row);
         }
-        if (started.values[0] != null or started.values[1] != null) try startup.append(allocator, started);
-        if (kept.values[0] != null or kept.values[1] != null) try world.append(allocator, kept);
+        any = any or rows.items.len != 0;
+        panel.* = .{ .title = measure.title, .unit = measure.unit, .rows = rows.items };
     }
-    if (startup.items.len == 0 and world.items.len == 0) return;
+    if (!any) return;
     const name = "startup-world.svg";
-    const image = try charts.dots(allocator, "Startup and world size", &.{
-        .{ .title = "Startup", .unit = "s", .rows = startup.items },
-        .{ .title = "World on disk", .unit = "MB", .rows = world.items },
-    });
+    const image = try charts.dots(allocator, "Startup and world size", &panels);
     const folder = try std.fs.path.join(allocator, &.{ directory, "charts" });
     try std.Io.Dir.cwd().createDirPath(io, folder);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ folder, name }), .data = image });
     try writer.print(
         \\## Startup and world size
         \\
-        \\**Startup** is from launching the server to its first answer to a status request, the median
-        \\of its idle runs. **World on disk** is everything the server keeps for its world after the
-        \\idle run with the fewest players, caches included. On real terrain every server starts from the
-        \\same square of pregenerated chunks, which SteelMC, reading no vanilla worlds, generates itself.
+        \\Startup is timed from launching the server three ways: to its first answer to a status
+        \\request, to a player logged in, without authentication, holding its first chunk, and to
+        \\that player holding every chunk of its render distance. Each is the median of the server's
+        \\idle runs. **World on disk** is everything the server keeps for its world after the idle run
+        \\with the fewest players, caches included. On real terrain every server starts from the same
+        \\square of pregenerated chunks, which SteelMC, reading no vanilla worlds, generates itself.
         \\
-        \\![Startup time and world size on disk of every server, flat and real terrain, on log scales]({s})
+        \\![Startup times and world size on disk of every server, flat and real terrain, on log scales]({s})
         \\
-        \\| Server | Startup flat s | Startup real s | World flat MB | World real MB |
-        \\|---|---:|---:|---:|---:|
-        \\
+        \\| Server |
     , .{try chartLink(allocator, charts_url, name)});
+    for (server_measures) |measure| for (charts.terrains) |terrain| try writer.print(" {s} {s} {s} |", .{ measure.column, terrain, measure.unit });
+    try writer.writeAll("\n|---|");
+    for (0..server_measures.len * charts.terrains.len) |_| try writer.writeAll("---:|");
+    try writer.writeByte('\n');
     for (std.enums.values(server_module.Kind)) |server| {
-        const started = for (startup.items) |row| {
-            if (row.server == server) break row;
-        } else charts.Row{ .server = server, .values = @splat(null) };
-        const kept = for (world.items) |row| {
-            if (row.server == server) break row;
-        } else charts.Row{ .server = server, .values = @splat(null) };
-        if (started.values[0] == null and started.values[1] == null and kept.values[0] == null and kept.values[1] == null) continue;
-        try writer.print("| {s} ", .{@tagName(server)});
-        for ([_]?f64{ started.values[0], started.values[1], kept.values[0], kept.values[1] }) |value| {
-            if (value) |v| try writer.print("| {d:.1} ", .{v}) else try writer.writeAll("| n/a ");
+        var line: std.Io.Writer.Allocating = .init(allocator);
+        var present = false;
+        for (panels) |panel| {
+            const row = for (panel.rows) |row| {
+                if (row.server == server) break row;
+            } else charts.Row{ .server = server, .values = @splat(null) };
+            for (row.values) |value| {
+                if (value) |v| {
+                    present = true;
+                    try line.writer.print(" {d:.2} |", .{v});
+                } else try line.writer.writeAll(" n/a |");
+            }
         }
-        try writer.writeAll("|\n");
+        if (present) try writer.print("| {s} |{s}\n", .{ @tagName(server), line.written() });
     }
     try writer.writeByte('\n');
 }
