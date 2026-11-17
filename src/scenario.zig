@@ -59,10 +59,31 @@ pub const Kind = enum {
     }
 };
 
-/// The chunks of a full view around one spot, at least: a vanilla view is the circle of chunks
-/// within the view distance, about 3.1 times its square.
+/// The chunks a player renders around one spot: those vanilla's ChunkTrackingView.isWithinDistance
+/// counts within the render distance, each axis a chunk short, 921 at a distance of 16. Vanilla
+/// sends a ring more, so the client can draw the edge, which this leaves out.
 pub fn viewChunks() u64 {
-    return 3 * view_distance * view_distance;
+    return view_chunks;
+}
+
+const view_chunks: u64 = count: {
+    @setEvalBranchQuota(10_000);
+    var count: u64 = 0;
+    const reach: i64 = view_distance + 1;
+    var x: i64 = -reach;
+    while (x <= reach) : (x += 1) {
+        var z: i64 = -reach;
+        while (z <= reach) : (z += 1) {
+            const dx: i64 = @max(0, (if (x < 0) -x else x) - 1);
+            const dz: i64 = @max(0, (if (z < 0) -z else z) - 1);
+            if (dx * dx + dz * dz < view_distance * view_distance) count += 1;
+        }
+    }
+    break :count count;
+};
+
+test "a full view is the chunks vanilla tracks" {
+    if (view_distance == 16) try std.testing.expectEqual(@as(u64, 921), viewChunks());
 }
 
 pub fn step(kind: Kind, bot: *Bot, count: usize) !void {
