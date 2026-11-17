@@ -181,14 +181,21 @@ pub const Server = struct {
         }
     }
 
-    /// Summons cows on a square field around a player, through the console as an operator would.
-    /// Lightning Rod has no console and spawns the same field itself once its player has been in
-    /// the world for a moment, told the count when it starts.
-    pub fn summonCows(self: *Server, count: usize, centre: [3]f64) !void {
-        if (self.options.kind == .@"lightning-rod") return;
+    /// Summons the cows from `from` up to `to` around a player, through the console as an operator
+    /// would. Lightning Rod has no console: it reads the count from the cows file in its directory,
+    /// as config.cows_file describes, and spawns the same cows itself.
+    pub fn summonCows(self: *Server, allocator: std.mem.Allocator, from: usize, to: usize, centre: [3]f64) !void {
+        if (self.options.kind == .@"lightning-rod") {
+            const path = try std.fs.path.join(allocator, &.{ self.options.directory, config.cows_file });
+            const pending = try std.fmt.allocPrint(allocator, "{s}.new", .{path});
+            // Written whole and renamed, so the server never reads half a count.
+            try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = pending, .data = try std.fmt.allocPrint(allocator, "{d}\n", .{to}) });
+            try std.Io.Dir.rename(std.Io.Dir.cwd(), pending, std.Io.Dir.cwd(), path, self.io);
+            return;
+        }
         var buffer: [128]u8 = undefined;
-        for (0..count) |index| {
-            const at = config.cowPosition(index, count, centre);
+        for (from..to) |index| {
+            const at = config.cowPosition(index, centre);
             try self.console(try std.fmt.bufPrint(&buffer, "summon minecraft:cow {d:.1} {d:.1} {d:.1}", .{ at[0], at[1], at[2] }));
         }
     }

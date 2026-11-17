@@ -21,7 +21,8 @@ pub const Settings = struct {
     /// The players of each step of the run, which goes on to the next while the server keeps up.
     players: []const usize = &.{1},
     /// Cows the cows scenario summons around its player.
-    cows: usize = 0,
+    /// The cows of each step of a cows run, around its one player.
+    cows: []const usize = &.{},
     warmup_s: u64 = 20,
     measure_s: u64 = 60,
     /// Half the machine's CPUs each when not given.
@@ -62,9 +63,12 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, verb, "run")) return usage();
     const server = settings.server orelse return usage();
     const kind = settings.scenario orelse return usage();
-    // Steps grow, and cows come only with the cows scenario, which always has some.
-    if (settings.players.len == 0 or settings.players[0] == 0 or (kind == .cows) != (settings.cows > 0)) return usage();
-    for (settings.players[1..], settings.players[0 .. settings.players.len - 1]) |after, before| if (after <= before) return usage();
+    // A cows run steps through cows around one player, and every other run through players.
+    // Cows come only with the cows scenario, which always has some, and steps grow.
+    if ((kind == .cows) != (settings.cows.len != 0)) return usage();
+    const steps = if (kind == .cows) settings.cows else settings.players;
+    if (steps.len == 0 or steps[0] == 0) return usage();
+    for (steps[1..], steps[0 .. steps.len - 1]) |after, before| if (after <= before) return usage();
     // Before pinning, while every CPU still counts.
     const host = try hostInfo(allocator, init.io);
     // Bots keep to their own CPUs, apart from the server's.
@@ -73,15 +77,15 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.Dir.cwd().createDirPath(init.io, settings.out);
     const results_path = try std.fs.path.join(allocator, &.{ settings.out, "results.jsonl" });
 
-    try measure(allocator, init.io, root, settings, server, kind, settings.players, settings.cows, results_path, host);
+    try measure(allocator, init.io, root, settings, server, kind, steps, results_path, host);
 }
 
 fn usage() error{InvalidArguments} {
     std.log.err(
         \\usage:
-        \\  bench run --server=<name> --scenario=<name> [--terrain=flat|real|wide] [--players=<count>,...] [--cows=<count>] [options]
-        \\                                    measure one server in one scenario, a step for each count of players while it
-        \\                                    keeps up, adding a result for each to <out>/results.jsonl
+        \\  bench run --server=<name> --scenario=<name> [--terrain=flat|real|wide] [--players=<count>,...] [--cows=<count>,...] [options]
+        \\                                    measure one server in one scenario, a step for each count of players, or of cows
+        \\                                    around one player, while it keeps up, adding a result for each to <out>/results.jsonl
         \\  bench report <directory> [--charts-url=<where the charts are published>]
         \\  bench pregen [--server=vanilla|steel] [--terrain=flat|real|wide] [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate the real terrain world with vanilla, or add a dimension to it
@@ -108,7 +112,10 @@ fn parseOption(settings: *Settings, argument: []const u8) !void {
         while (items.next()) |item| try list.append(std.heap.page_allocator, try std.fmt.parseInt(usize, item, 10));
         settings.players = list.items;
     } else if (std.mem.eql(u8, name, "--cows")) {
-        settings.cows = try std.fmt.parseInt(usize, value, 10);
+        var list: std.ArrayList(usize) = .empty;
+        var items = std.mem.tokenizeScalar(u8, value, ',');
+        while (items.next()) |item| try list.append(std.heap.page_allocator, try std.fmt.parseInt(usize, item, 10));
+        settings.cows = list.items;
     } else if (std.mem.eql(u8, name, "--warmup")) {
         settings.warmup_s = try std.fmt.parseInt(u64, value, 10);
     } else if (std.mem.eql(u8, name, "--seconds")) {
@@ -380,12 +387,14 @@ const limits = struct {
     const bot_cpu = 0.95;
 };
 
-/// Measures one server in one scenario. The server starts once, then each count of players in
-/// `steps` joins in turn, settles and is measured, adding a result for each to `results_path`, until
-/// a step breaks a limit. One step is a plain run.
-fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings, kind: server_module.Kind, scenario_kind: scenario.Kind, steps: []const usize, cows: usize, results_path: []const u8, host: Host) !void {
+/// Measures one server in one scenario. The server starts once, then each count in `steps` comes
+/// in turn, players joining or, in the cows scenario, cows around its one player, settles and is
+/// measured, adding a result for each to `results_path`, until a step breaks a limit. One step is
+/// a plain run.
+fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings, kind: server_module.Kind, scenario_kind: scenario.Kind, steps: []const usize, results_path: []const u8, host: Host) !void {
+    const counting_cows = scenario_kind == .cows;
     const most = std.mem.max(usize, steps);
-    const label = if (scenario_kind == .cows) try std.fmt.allocPrint(allocator, "{d}", .{cows}) else if (steps.len == 1) try std.fmt.allocPrint(allocator, "{d}", .{steps[0]}) else "ramp";
+    const label = if (steps.len == 1) try std.fmt.allocPrint(allocator, "{d}", .{steps[0]}) else "ramp";
     const directory = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}/{s}/{s}", .{ settings.out, @tagName(settings.terrain), @tagName(scenario_kind), @tagName(kind), label });
     std.Io.Dir.cwd().deleteTree(io, directory) catch {};
     const metrics = try std.fmt.allocPrint(allocator, "/dev/shm/mc-server-bench-{d}", .{linux.getpid()});
@@ -398,7 +407,6 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         .terrain = @tagName(settings.terrain),
         .scenario = @tagName(scenario_kind),
         .players = 0,
-        .cows = cows,
         .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(),
         .startup_s = 0,
     };
@@ -409,8 +417,8 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         .kind = kind,
         .root = root,
         .directory = directory,
-        .players = most,
-        .cows = cows,
+        .players = if (counting_cows) 1 else most,
+        .cows = if (counting_cows) most else 0,
         .cpus = settings.server_cpus.?,
         .metrics = metrics,
         .terrain = settings.terrain,
@@ -435,18 +443,21 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     defer if (dump) |fd| {
         _ = linux.close(fd);
     };
-    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump }, most, settings.bot_threads);
-    var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched, .cows = cows };
+    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump }, if (counting_cows) 1 else most, settings.bot_threads);
+    var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched };
     try swarm.start();
     var swarm_stopped = false;
     defer if (!swarm_stopped) swarm.stop();
 
     var last: Result = base;
-    for (steps, 0..) |players, index| {
+    for (steps, 0..) |count, index| {
+        const players = if (counting_cows) 1 else count;
+        const cows = if (counting_cows) count else 0;
         std.log.info("{s} {s} on {s} terrain with {d} players{s}", .{ @tagName(kind), @tagName(scenario_kind), @tagName(settings.terrain), players, if (cows > 0) try std.fmt.allocPrint(allocator, " among {d} cows", .{cows}) else "" });
-        const result = step(allocator, io, settings, &run, kind, scenario_kind, players, index == 0, launched, metrics, base) catch |err| failed: {
+        const result = step(allocator, io, settings, &run, kind, scenario_kind, players, cows, launched, metrics, base) catch |err| failed: {
             var broken = base;
             broken.players = players;
+            broken.cows = cows;
             broken.limit = if (err == error.ServerExited) "the server exited" else @errorName(err);
             broken.problems = try allocator.dupe([]const u8, &.{broken.limit});
             break :failed broken;
@@ -498,11 +509,12 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
 
 /// One step of a run: the players up to `players` join, settle and are measured, and the step
 /// is checked against the limits.
-fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run, kind: server_module.Kind, scenario_kind: scenario.Kind, players: usize, first_step: bool, launched: u64, metrics: []const u8, base: Result) !Result {
+fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run, kind: server_module.Kind, scenario_kind: scenario.Kind, players: usize, cows: usize, launched: u64, metrics: []const u8, base: Result) !Result {
     const swarm = run.swarm;
     const server = run.server;
     var result = base;
     result.players = players;
+    result.cows = cows;
     var problems: std.ArrayList([]const u8) = .empty;
     const newcomers = players - swarm.admitted;
     const admitted_at = now();
@@ -511,15 +523,19 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     run.phase = "join";
     if (!try run.wait(newcomers * settings.join_interval_ms / 1000 + 120, Run.joined)) try problems.append(allocator, "not every bot joined in time");
     result.join_s = seconds(latest(swarm, .spawned_ns) -| admitted_at);
-    if (first_step and run.cows > 0) {
-        // The cows around the player once it is in, before warming up, and every one of them
-        // sent to it.
+    var cows_missing: u64 = 0;
+    if (cows > run.cows) {
+        // The step's new cows around the player, before warming up, and every cow sent to it.
         run.phase = "cows";
         // Servers load the field around the player while it joins, and refuse a cow in a chunk
-        // not yet loaded, so the cows come once the player holds a full view.
-        if (!try run.wait(120, Run.viewed)) try problems.append(allocator, "the player had no full view to summon cows in");
-        try server.summonCows(run.cows, swarm.bots[0].origin);
-        if (!try run.wait(120, Run.sawCows)) try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ swarm.total(.cows_seen), run.cows }));
+        // not yet loaded, so the first cows come once the player holds a full view.
+        if (run.cows == 0 and !try run.wait(120, Run.viewed)) try problems.append(allocator, "the player had no full view to summon cows in");
+        try server.summonCows(allocator, run.cows, cows, swarm.bots[0].origin);
+        run.cows = cows;
+        if (!try run.wait(120, Run.sawCows)) {
+            cows_missing = cows -| swarm.total(.cows_seen);
+            try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ swarm.total(.cows_seen), cows }));
+        }
     }
     if (scenario_kind.travels()) {
         run.phase = "travel";
@@ -609,6 +625,8 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
         try std.fmt.allocPrint(allocator, "{d:.1} TPS", .{window.tps})
     else if (window.pings != 0 and window.ping_p99_ms > limits.ping_p99_ms)
         try std.fmt.allocPrint(allocator, "ping p99 {d:.0} ms", .{window.ping_p99_ms})
+    else if (cows_missing != 0)
+        try std.fmt.allocPrint(allocator, "the player never got {d} cows", .{cows_missing})
     else if (viewless != 0)
         try std.fmt.allocPrint(allocator, "{d} {s} no full view", .{ viewless, if (viewless == 1) "player had" else "players had" })
     else if (corrections != 0)
