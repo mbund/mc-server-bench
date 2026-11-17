@@ -18,6 +18,8 @@ pub const Settings = struct {
     servers: []const server_module.Kind = &.{},
     scenarios: []const scenario.Kind = &.{},
     players: []const usize = &.{},
+    /// Cows the `cows` scenario summons around its one player, in place of player counts.
+    cows: []const usize = &.{},
     warmup_s: u64 = 20,
     measure_s: u64 = 60,
     /// Half the machine's CPUs each when not given.
@@ -60,7 +62,9 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, verb, "run")) {
         if (settings.servers.len != 1 or settings.scenarios.len != 1 or settings.players.len != 1) return usage();
     } else if (!std.mem.eql(u8, verb, "sweep")) return usage();
-    if (settings.servers.len == 0 or settings.scenarios.len == 0 or settings.players.len == 0) return usage();
+    if (settings.servers.len == 0 or settings.scenarios.len == 0) return usage();
+    // Player counts for every scenario but cows, and cow counts for cows.
+    for (settings.scenarios) |kind| if ((if (kind == .cows) settings.cows else settings.players).len == 0) return usage();
     // Before pinning, while every CPU still counts.
     const host = try hostInfo(allocator, init.io);
     // Bots keep to their own CPUs, apart from the server's.
@@ -70,9 +74,13 @@ pub fn main(init: std.process.Init) !void {
     const results_path = try std.fs.path.join(allocator, &.{ settings.out, "results.jsonl" });
 
     var failures: usize = 0;
-    for (settings.terrains) |terrain| for (settings.scenarios) |kind| for (settings.players) |players| for (settings.servers) |server| {
+    // The cows scenario counts cows around one player where every other counts players.
+    for (settings.terrains) |terrain| for (settings.scenarios) |kind| for (if (kind == .cows) settings.cows else settings.players) |count| for (settings.servers) |server| {
+        const players: usize = if (kind == .cows) 1 else count;
+        const cows: usize = if (kind == .cows) count else 0;
         // Bots on real terrain fly above it, and only the pregenerated area is the same everywhere.
-        if (terrain == .real and (kind == .build or kind == .explore)) continue;
+        // Cows graze on the flat world only.
+        if (terrain == .real and (kind == .build or kind == .explore or kind == .cows)) continue;
         if (terrain == .real and kind == .spread and scenario.spreadReach(players) > config.terrain_radius * 16) {
             std.log.info("skipping {s} spread on real terrain with {d} players, whose views reach past the pregenerated area", .{ @tagName(server), players });
             continue;
@@ -81,9 +89,9 @@ pub fn main(init: std.process.Init) !void {
         defer arena.deinit();
         var run_settings = settings;
         run_settings.terrain = terrain;
-        std.log.info("{s} {s} on {s} terrain with {d} players", .{ @tagName(server), @tagName(kind), @tagName(terrain), players });
-        var result = measure(arena.allocator(), init.io, root, run_settings, server, kind, players) catch |err| {
-            std.log.err("{s} {s} {d}: {s}", .{ @tagName(server), @tagName(kind), players, @errorName(err) });
+        std.log.info("{s} {s} on {s} terrain with {d} players and {d} cows", .{ @tagName(server), @tagName(kind), @tagName(terrain), players, cows });
+        var result = measure(arena.allocator(), init.io, root, run_settings, server, kind, players, cows) catch |err| {
+            std.log.err("{s} {s} {d}: {s}", .{ @tagName(server), @tagName(kind), count, @errorName(err) });
             failures += 1;
             continue;
         };
@@ -108,10 +116,11 @@ fn usage() error{InvalidArguments} {
         \\  bench pregen [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate the real terrain world with vanilla, or add a dimension to it
         \\servers: vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion
-        \\scenarios: idle wander spread explore build
+        \\scenarios: idle wander spread explore build cows
         \\options: --warmup=<s> --seconds=<s> --server-cpus=<list> --bot-cpus=<list>
         \\         --bot-threads=<n> --join-interval=<ms> --out=<directory> --keep-worlds
-        \\         --dump-frames=<path prefix> --terrains=flat,real (real skips explore and build)
+        \\         --dump-frames=<path prefix> --terrains=flat,real (real skips explore, build and cows)
+        \\         --cows=16,256 (cows around one player in the cows scenario, in place of --players)
     , .{});
     return error.InvalidArguments;
 }
@@ -129,6 +138,11 @@ fn parseOption(allocator: std.mem.Allocator, settings: *Settings, argument: []co
         var items = std.mem.tokenizeScalar(u8, value, ',');
         while (items.next()) |item| try list.append(allocator, try std.fmt.parseInt(usize, item, 10));
         settings.players = list.items;
+    } else if (std.mem.eql(u8, name, "--cows")) {
+        var list: std.ArrayList(usize) = .empty;
+        var items = std.mem.tokenizeScalar(u8, value, ',');
+        while (items.next()) |item| try list.append(allocator, try std.fmt.parseInt(usize, item, 10));
+        settings.cows = list.items;
     } else if (std.mem.eql(u8, name, "--warmup")) {
         settings.warmup_s = try std.fmt.parseInt(u64, value, 10);
     } else if (std.mem.eql(u8, name, "--seconds")) {
@@ -263,6 +277,8 @@ pub const Result = struct {
     terrain: []const u8,
     scenario: []const u8,
     players: usize,
+    /// Cows summoned around the players, in the cows scenario.
+    cows: usize = 0,
     started_unix_s: i64,
     startup_s: f64,
     /// From the first bot connecting to the last one in play.
@@ -321,6 +337,7 @@ const Run = struct {
     phase: []const u8 = "start",
     last_sample_ns: u64 = 0,
     last_query_ns: u64 = 0,
+    cows: usize = 0,
 
     /// Samples once a second until a condition holds or a limit passes.
     fn wait(self: *Run, limit_s: u64, comptime done: ?fn (*Run) bool) !bool {
@@ -363,18 +380,22 @@ const Run = struct {
         return self.swarm.reached(.spawned_ns) + self.swarm.count(.failed) == self.swarm.bots.len;
     }
 
+    fn sawCows(self: *Run) bool {
+        return self.swarm.total(.cows_seen) >= self.cows;
+    }
+
     fn arrived(self: *Run) bool {
         return self.swarm.reached(.arrived_ns) + self.swarm.count(.failed) == self.swarm.bots.len;
     }
 };
 
-fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings, kind: server_module.Kind, scenario_kind: scenario.Kind, players: usize) !Result {
-    const directory = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}/{s}/{d}", .{ settings.out, @tagName(settings.terrain), @tagName(scenario_kind), @tagName(kind), players });
+fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings, kind: server_module.Kind, scenario_kind: scenario.Kind, players: usize, cows: usize) !Result {
+    const directory = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}/{s}/{d}", .{ settings.out, @tagName(settings.terrain), @tagName(scenario_kind), @tagName(kind), if (scenario_kind == .cows) cows else players });
     std.Io.Dir.cwd().deleteTree(io, directory) catch {};
     const metrics = try std.fmt.allocPrint(allocator, "/dev/shm/mc-server-bench-{d}", .{linux.getpid()});
     std.Io.Dir.cwd().deleteTree(io, metrics) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, metrics) catch {};
-    var result: Result = .{ .server = @tagName(kind), .terrain = @tagName(settings.terrain), .scenario = @tagName(scenario_kind), .players = players, .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(), .startup_s = 0 };
+    var result: Result = .{ .server = @tagName(kind), .terrain = @tagName(settings.terrain), .scenario = @tagName(scenario_kind), .players = players, .cows = cows, .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(), .startup_s = 0 };
     var problems: std.ArrayList([]const u8) = .empty;
 
     if (bot.probe(config.port)) return error.PortInUse;
@@ -384,6 +405,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         .root = root,
         .directory = directory,
         .players = players,
+        .cows = cows,
         .cpus = settings.server_cpus.?,
         .metrics = metrics,
         .terrain = settings.terrain,
@@ -409,7 +431,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         _ = linux.close(fd);
     };
     const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump }, players, settings.bot_threads);
-    var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched };
+    var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched, .cows = cows };
     try swarm.start();
     var swarm_stopped = false;
     defer if (!swarm_stopped) swarm.stop();
@@ -417,6 +439,13 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     run.phase = "join";
     if (!try run.wait(players * settings.join_interval_ms / 1000 + 120, Run.joined)) try problems.append(allocator, "not every bot joined in time");
     result.join_s = seconds(latest(swarm, .spawned_ns) -| swarm.started_ns);
+    if (cows > 0) {
+        // The cows around the player once it is in, before warming up, and every one of them
+        // sent to it.
+        run.phase = "cows";
+        try server.summonCows(cows, swarm.bots[0].origin);
+        if (!try run.wait(120, Run.sawCows)) try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ swarm.total(.cows_seen), cows }));
+    }
     if (scenario_kind.travels()) {
         run.phase = "travel";
         const travel_start = now();
@@ -517,7 +546,8 @@ fn check(allocator: std.mem.Allocator, swarm: *bot.Swarm, kind: scenario.Kind, p
             .idle, .wander => if (counters.get(.players_seen) + 1 < swarm.bots.len)
                 try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} saw {d} of {d} other players", .{ each.label(), counters.get(.players_seen), swarm.bots.len - 1 })),
             .spread, .build => if (counters.get(.arrived_ns) == 0) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} never reached its spot", .{each.label()})),
-            .explore => {},
+            // Measured when the cows were summoned, before warming up.
+            .explore, .cows => {},
         }
         // Servers acknowledge every edit up to a sequence, often several at once, so the newest
         // acknowledged sequence must keep within a second of the newest edit sent.

@@ -31,7 +31,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         \\`./run.sh --scenarios=<scenario>` one scenario, as CI runs each on a machine of its own.
         \\Every server gets the same view and simulation distance, {d} chunks, and bots on their own CPUs.
         \\Each scenario names the machine its runs measured on and charts how its measures grow with
-        \\players, followed by a table for every player count.
+        \\players, or cows in the cows scenario, followed by a table for every count.
         \\
         \\## Servers
         \\
@@ -65,7 +65,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         var counts: std.ArrayList(u64) = .empty;
         for (runs.items) |run| {
             if (!matches(run, terrain, kind)) continue;
-            const players: u64 = @intFromFloat(number(run, &.{"players"}));
+            const players: u64 = @intFromFloat(number(run, &.{axis(kind)}));
             if (std.mem.indexOfScalar(u64, counts.items, players) == null) try counts.append(allocator, players);
         }
         if (counts.items.len == 0) continue;
@@ -125,7 +125,7 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
     }
     const name = try std.fmt.allocPrint(allocator, "{s}-{s}.svg", .{ @tagName(terrain), @tagName(kind) });
     const title = try std.fmt.allocPrint(allocator, "{s} terrain, {s}", .{ terrainName(terrain), @tagName(kind) });
-    const image = try charts.svg(allocator, title, counts, panels.items);
+    const image = try charts.svg(allocator, title, axis(kind), counts, panels.items);
     const folder = try std.fs.path.join(allocator, &.{ directory, "charts" });
     try std.Io.Dir.cwd().createDirPath(io, folder);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ folder, name }), .data = image });
@@ -136,12 +136,12 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
         if (!std.mem.eql(u8, fields.next() orelse continue, name)) continue;
         link = @constCast(fields.next() orelse continue);
     }
-    try writer.print("![{s}: CPU time, tick time, traffic and memory by player count, on log scales]({s})\n\n", .{ title, link });
+    try writer.print("![{s}: CPU time, tick time, traffic and memory by number of {s}, on log scales]({s})\n\n", .{ title, axis(kind), link });
     try writer.writeAll("Log scales, so a server using a hundred times more than another reads as clearly as one using twice as much. A gap in a line is a player count without a result, and a server with no tick times of its own has no mspt line.\n\n");
 }
 
 fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, players: u64) !void {
-    try writer.print("### {d} {s}\n\n", .{ players, if (players == 1) "player" else "players" });
+    try writer.print("### {d} {s}\n\n", .{ players, if (players == 1) axis(kind)[0 .. axis(kind).len - 1] else axis(kind) });
     try writer.writeAll(
         \\| Server | Total KB | KB/s | KB/chunk | Chunks | CPU ms/tick | mspt mean | mspt p99 | TPS | Peak RAM MB | Disk MB | World MB | Problems |
         \\|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -192,7 +192,7 @@ fn latest(runs: []const Object, server: server_module.Kind, terrain: server_modu
     var found: ?Object = null;
     for (runs) |run| {
         if (!matches(run, terrain, kind) or !std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) continue;
-        if (number(run, &.{"players"}) != @as(f64, @floatFromInt(players))) continue;
+        if (number(run, &.{axis(kind)}) != @as(f64, @floatFromInt(players))) continue;
         found = run;
     }
     return found;
@@ -247,5 +247,11 @@ fn description(kind: scenario.Kind) []const u8 {
         .spread => "Everyone flies to a spot of their own, far enough apart that views never overlap, and hovers there.",
         .explore => "Everyone flies outward at 20 blocks a second into terrain never generated before.",
         .build => "Everyone places or breaks a block every tick at a spot of their own near spawn.",
+        .cows => "One player stands at spawn among cows summoned two blocks apart on a square field around them, all in view and ticking.",
     };
+}
+
+/// What a scenario counts: cows around one player in the cows scenario, players in every other.
+fn axis(kind: scenario.Kind) []const u8 {
+    return if (kind == .cows) "cows" else "players";
 }

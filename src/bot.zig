@@ -23,6 +23,7 @@ const tick_ns = 50 * std.time.ns_per_ms;
 /// asks for. Servers cap it, vanilla at 64.
 pub const chunks_per_tick: f32 = 25;
 pub const entity_player = 156;
+pub const entity_cow = 30;
 pub const item_stone = 1;
 
 pub const Counter = enum {
@@ -37,6 +38,7 @@ pub const Counter = enum {
     corrections,
     players_seen,
     entities_seen,
+    cows_seen,
     entities_removed,
     edits,
     acks,
@@ -410,6 +412,7 @@ pub const Bot = struct {
             _ = try reader.take(16);
             const kind = try reader.varint();
             self.counters.add(if (kind == entity_player) .players_seen else .entities_seen, 1);
+            if (kind == entity_cow) self.counters.add(.cows_seen, 1);
         } else if (id == In.packetId(.entity_destroy)) {
             self.counters.add(.entities_removed, @intCast(@max(0, try reader.varint())));
         } else if (id == In.packetId(.acknowledge_player_digging)) {

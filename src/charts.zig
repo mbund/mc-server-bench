@@ -1,5 +1,5 @@
 //! Charts for the report: for one terrain and scenario, a panel per measure with a line per server
-//! over player counts, on a log scale so a server using a little and one using thousands of times
+//! over player counts, or cow counts, on a log scale so a server using a little and one using thousands of times
 //! more both read, drawn as one SVG file. Measures of different units never share a panel.
 
 const std = @import("std");
@@ -56,7 +56,8 @@ const plot_top = 34;
 const plot_bottom = 40;
 const label_spacing = 13;
 
-pub fn svg(allocator: std.mem.Allocator, title: []const u8, counts: []const u64, panels: []const Panel) ![]u8 {
+/// `axis` names what the counts count, players or cows.
+pub fn svg(allocator: std.mem.Allocator, title: []const u8, axis: []const u8, counts: []const u64, panels: []const Panel) ![]u8 {
     std.debug.assert(counts.len >= 2);
     var output: std.Io.Writer.Allocating = .init(allocator);
     const writer = &output.writer;
@@ -78,7 +79,7 @@ pub fn svg(allocator: std.mem.Allocator, title: []const u8, counts: []const u64,
     for (panels, 0..) |panel, index| {
         const x: f64 = @floatFromInt(16 + (index % 2) * (panel_width + gap));
         const y: f64 = @floatFromInt(header + (index / 2) * (panel_height + gap));
-        try drawPanel(allocator, writer, x, y, counts, panel);
+        try drawPanel(allocator, writer, x, y, axis, counts, panel);
     }
     try writer.writeAll("</svg>\n");
     return output.toOwnedSlice();
@@ -99,7 +100,7 @@ fn legend(writer: *std.Io.Writer, panels: []const Panel) !void {
     }
 }
 
-fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f64, counts: []const u64, panel: Panel) !void {
+fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f64, axis: []const u8, counts: []const u64, panel: Panel) !void {
     try writer.print("<text class=\"t1 panel\" x=\"{d:.1}\" y=\"{d:.1}\">{s} ({s}, log scale)</text>\n", .{ x, y + 16, panel.measure.title, panel.measure.unit });
     const left = x + plot_left;
     const right = x + panel_width - plot_right;
@@ -137,7 +138,7 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
     for (counts, 0..) |players, index| {
         try writer.print("<text class=\"t2\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"middle\">{d}</text>\n", .{ column(index, counts.len, left, right), bottom + 16, players });
     }
-    try writer.print("<text class=\"t2\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"middle\">players</text>\n", .{ (left + right) / 2, bottom + 32 });
+    try writer.print("<text class=\"t2\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"middle\">{s}</text>\n", .{ (left + right) / 2, bottom + 32, axis });
 
     // Lines join consecutive results, leaving a gap where one is missing.
     for (panel.series) |series| {
@@ -152,7 +153,7 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
     for (panel.series) |series| {
         const color = colors[@intFromEnum(series.server)];
         for (series.values, 0..) |value, index| if (value) |v| {
-            try writer.print("<circle class=\"ring\" cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"4\" fill=\"{s}\" stroke-width=\"2\"><title>{s}, {d} players: {d:.2} {s}</title></circle>", .{ column(index, counts.len, left, right), scale(v, low, high, top, bottom), color, @tagName(series.server), counts[index], v, panel.measure.unit });
+            try writer.print("<circle class=\"ring\" cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"4\" fill=\"{s}\" stroke-width=\"2\"><title>{s}, {d} {s}: {d:.2} {s}</title></circle>", .{ column(index, counts.len, left, right), scale(v, low, high, top, bottom), color, @tagName(series.server), counts[index], axis, v, panel.measure.unit });
         };
     }
     try writer.writeByte('\n');

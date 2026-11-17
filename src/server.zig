@@ -93,6 +93,8 @@ pub const Options = struct {
     /// A fresh directory the server runs in.
     directory: []const u8,
     players: usize,
+    /// Cows the scenario summons, which Lightning Rod spawns itself.
+    cows: usize = 0,
     cpus: []const u8,
     /// Where Lightning Rod writes its tick samples, off the disk being measured.
     metrics: []const u8,
@@ -159,6 +161,18 @@ pub const Server = struct {
                 try self.console("gamerule respawn_radius 0");
             },
             .@"lightning-rod", .steel => {},
+        }
+    }
+
+    /// Summons cows on a square field around a player, through the console as an operator would.
+    /// Lightning Rod has no console and spawns the same field itself once its player has been in
+    /// the world for a moment, told the count when it starts.
+    pub fn summonCows(self: *Server, count: usize, centre: [3]f64) !void {
+        if (self.options.kind == .@"lightning-rod") return;
+        var buffer: [128]u8 = undefined;
+        for (0..count) |index| {
+            const at = config.cowPosition(index, count, centre);
+            try self.console(try std.fmt.bufPrint(&buffer, "summon minecraft:cow {d:.1} {d:.1} {d:.1}", .{ at[0], at[1], at[2] }));
         }
     }
 
@@ -269,8 +283,9 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
         .vanilla => try allocator.dupe([]const u8, &.{
             "java", "-Xmx4G", try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/vanilla/server.jar" }), "--nogui",
         }),
-        // Configured in code with the bench's settings, and takes only the room for players.
-        .@"lightning-rod" => try allocator.dupe([]const u8, &.{ try std.fs.path.join(allocator, &.{ root, "servers/build/lightning-rod/bin/lightning_rod" }), try std.fmt.allocPrint(allocator, "{d}", .{config.maxPlayers(options.players)}) }),
+        // Configured in code with the bench's settings, and takes the room for players and the cows
+        // to spawn.
+        .@"lightning-rod" => try allocator.dupe([]const u8, &.{ try std.fs.path.join(allocator, &.{ root, "servers/build/lightning-rod/bin/lightning_rod" }), try std.fmt.allocPrint(allocator, "{d}", .{config.maxPlayers(options.players)}), try std.fmt.allocPrint(allocator, "{d}", .{options.cows}) }),
         // Vanilla's jar unpacks where the vanilla runs unpack it, and the launcher finds its
         // libraries beside itself.
         .fabric, .@"fabric-occlusion" => try allocator.dupe([]const u8, &.{

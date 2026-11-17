@@ -34,6 +34,8 @@ pub const Kind = enum {
     explore,
     /// Everyone places and breaks blocks at a spot of their own near spawn.
     build,
+    /// One player stands at spawn among cows the server summons on a square field around them.
+    cows,
 
     /// Whether bots must reach a place before measuring starts.
     pub fn travels(kind: Kind) bool {
@@ -49,7 +51,7 @@ pub fn viewChunks() u64 {
 
 pub fn step(kind: Kind, bot: *Bot, count: usize) !void {
     switch (kind) {
-        .idle => {
+        .idle, .cows => {
             // A vanilla client that does not move still reports its position once a second.
             if ((bot.ticks + bot.index) % 20 == 0) try bot.move(false);
         },

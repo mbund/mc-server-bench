@@ -166,7 +166,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [idle, wander, spread, explore, build]
+        scenario: [idle, wander, spread, explore, build, cows]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-java@v6
