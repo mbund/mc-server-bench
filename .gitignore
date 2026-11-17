@@ -3,5 +3,6 @@ zig-out/
 runs/
 servers/vanilla/
 servers/paper/
+servers/fabric/
 servers/build/
 zig-pkg/

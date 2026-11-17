@@ -3,11 +3,11 @@
 # idle, wander and spread on real terrain, with 1, 5 and 10 players. Results gather in
 # runs/standard/results.jsonl and the report in runs/standard/report.md. CI runs one server per
 # job with this same command and joins their results into one report.
-# Usage: ./run.sh [vanilla|lightning-rod|pumpkin|steel|paper|paper-antixray-1]...
+# Usage: ./run.sh [vanilla|lightning-rod|pumpkin|steel|paper|paper-antixray-1|fabric]...
 set -euo pipefail
 cd "$(dirname "$0")"
 if [ -z "${MC_SERVER_BENCH_SHELL:-}" ]; then exec nix develop --command "$0" "$@"; fi
-servers=${*:-vanilla lightning-rod pumpkin steel paper paper-antixray-1}
+servers=${*:-vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric}
 out=runs/standard
 ./setup.sh $servers
 ./zig-out/bin/bench sweep --servers="${servers// /,}" --terrains=real,flat \

@@ -15,6 +15,9 @@ pub const Kind = enum {
     paper,
     /// Paper with anti-xray replacing ores enclosed by solid blocks with stone.
     @"paper-antixray-1",
+    /// Fabric with the mods servers commonly run for performance: FerriteCore for memory, Lithium
+    /// for game logic, ScalableLux for light and Krypton for networking.
+    fabric,
 
     pub fn isPaper(kind: Kind) bool {
         return kind == .paper or kind == .@"paper-antixray-1";
@@ -33,7 +36,7 @@ pub const Kind = enum {
     /// Everything a server stores for its worlds, relative to the server's directory.
     pub fn worldPaths(kind: Kind) []const []const u8 {
         return switch (kind) {
-            .vanilla, .pumpkin, .paper, .@"paper-antixray-1" => &.{"world"},
+            .vanilla, .pumpkin, .paper, .@"paper-antixray-1", .fabric => &.{"world"},
             // Lightning Rod keeps its chunk cache and write ahead log beside the world.
             .@"lightning-rod" => &.{ "world", "world.cache", "world.wal" },
             .steel => &.{"saves"},
@@ -47,6 +50,7 @@ pub fn version(kind: Kind, allocator: std.mem.Allocator, io: std.Io, root: []con
     const directory = switch (kind) {
         .vanilla => return "26.2",
         .paper, .@"paper-antixray-1" => return "26.2 build 135",
+        .fabric => return "26.2, Fabric Loader 0.20.1, FerriteCore 9.0.0, Lithium 0.25.3, ScalableLux 0.3.0-alpha.0.3, Krypton 0.3.1",
         .@"lightning-rod" => "servers/lightning-rod",
         .pumpkin => "servers/pumpkin",
         .steel => "servers/steel",
@@ -141,7 +145,7 @@ pub const Server = struct {
     /// Settings only a console sets, sent once the server is ready and before anyone joins.
     pub fn configure(self: *Server) !void {
         switch (self.options.kind) {
-            .vanilla, .pumpkin, .paper, .@"paper-antixray-1" => {
+            .vanilla, .pumpkin, .paper, .@"paper-antixray-1", .fabric => {
                 // No natural spawning on any server, so mobs come only from scenarios.
                 try self.console("gamerule spawn_mobs false");
                 // Everyone spawns on the same block, as on the servers without a spawn radius.
@@ -260,6 +264,11 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
         }),
         // Configured in code with the bench's settings, so it takes no flags.
         .@"lightning-rod" => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/build/lightning-rod/bin/lightning_rod" })}),
+        // Vanilla's jar unpacks where the vanilla runs unpack it, and the launcher finds its
+        // libraries beside itself.
+        .fabric => try allocator.dupe([]const u8, &.{
+            "java", "-Xmx4G", try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/fabric/fabric-server-launch.jar" }), "--nogui",
+        }),
         .paper, .@"paper-antixray-1" => try allocator.dupe([]const u8, &.{
             "java", "-Xmx4G", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/paper/paper.jar" }), "--nogui",
         }),
@@ -281,8 +290,9 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     }.join;
     const flat = options.terrain == .flat;
     switch (options.kind) {
-        .vanilla, .paper, .@"paper-antixray-1" => {
+        .vanilla, .paper, .@"paper-antixray-1", .fabric => {
             if (options.kind.isPaper()) try preparePaper(allocator, io, options);
+            if (options.kind == .fabric) try prepareFabric(allocator, io, options);
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "eula.txt"), .data = "eula=true\n" });
             var escaped: std.ArrayList(u8) = .empty;
             for (flat_layers_json) |byte| {
@@ -423,6 +433,15 @@ fn preparePaper(allocator: std.mem.Allocator, io: std.Io, options: Options) !voi
     const config_directory = try std.fs.path.join(allocator, &.{ options.directory, "config" });
     try cwd.createDirPath(io, config_directory);
     try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ config_directory, "paper-world-defaults.yml" }), .data = anti_xray });
+}
+
+/// Links the mods setup.sh fetched and points the launcher at the vanilla jar the vanilla runs use.
+fn prepareFabric(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
+    const cwd = std.Io.Dir.cwd();
+    const mods = try std.fs.path.join(allocator, &.{ options.root, "servers/fabric/mods" });
+    cwd.access(io, mods, .{}) catch return error.MissingFabricSetup;
+    try cwd.symLink(io, mods, try std.fs.path.join(allocator, &.{ options.directory, "mods" }), .{ .is_directory = true });
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ options.directory, "fabric-server-launcher.properties" }), .data = try std.fmt.allocPrint(allocator, "serverJar={s}/servers/vanilla/server.jar\n", .{options.root}) });
 }
 
 fn copy(allocator: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8) !void {
