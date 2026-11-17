@@ -73,14 +73,29 @@ const flat_layers_json =
     \\{"layers":[{"block":"minecraft:stone","height":128},{"block":"minecraft:grass_block","height":1}],"biome":"minecraft:plains","structure_overrides":[]}
 ;
 
+/// The worlds runs start from, every one pregenerated once in a square around the origin, so no
+/// run generates terrain: vanilla generates each for every server that reads vanilla worlds,
+/// Lightning Rod imports it, and SteelMC, which reads none, generates the same chunks itself.
 pub const Terrain = enum {
-    /// Stone and grass, which every server generates alike.
+    /// Stone and grass.
     flat,
-    /// A copy of one pregenerated vanilla world, the same for every server that reads vanilla
-    /// worlds.
+    /// Vanilla's terrain from the bench's seed.
     real,
-    /// Vanilla generating that world from the seed, only for pregeneration.
-    generate,
+    /// Stone and grass far enough out for the views of 256 players spread apart.
+    wide,
+
+    /// Chunks out from the origin that the world covers.
+    pub fn radius(terrain: Terrain) i32 {
+        return switch (terrain) {
+            .flat, .real => 64,
+            .wide => 336,
+        };
+    }
+
+    /// Where a server's copy of the world is kept, under the bench repository.
+    pub fn directory(terrain: Terrain, allocator: std.mem.Allocator, server: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(allocator, "servers/build/worlds/{s}/{s}", .{ @tagName(terrain), server });
+    }
 };
 
 /// A number, since servers hash text seeds differently.
@@ -99,6 +114,8 @@ pub const Options = struct {
     /// Where Lightning Rod writes its tick samples, off the disk being measured.
     metrics: []const u8,
     terrain: Terrain = .flat,
+    /// Generating the world to pregenerate it, rather than starting from it.
+    generating: bool = false,
 };
 
 /// A tick report, as vanilla's `tick query` prints it.
@@ -300,8 +317,8 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
 }
 
 /// Writes each server's settings: offline mode, creative, the same view and simulation distance,
-/// no spawn protection, no pausing when empty and room for every bot. The world is the flat one
-/// every server generates alike, or a copy of the same pregenerated vanilla world.
+/// no spawn protection, no pausing when empty and room for every bot. The world is a copy of the
+/// server's pregenerated one, unless it is generating it.
 fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     const cwd = std.Io.Dir.cwd();
     try cwd.createDirPath(io, options.directory);
@@ -310,7 +327,9 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             return std.fs.path.join(a, &.{ directory, name });
         }
     }.join;
-    const flat = options.terrain == .flat;
+    const flat = options.terrain != .real;
+    // Where vanilla's pregenerated world is, which every server reading vanilla worlds copies.
+    const vanilla_world = try path(allocator, options.root, try path(allocator, try options.terrain.directory(allocator, "vanilla"), "world"));
     switch (options.kind) {
         .vanilla, .paper, .@"paper-antixray-1", .fabric, .@"fabric-occlusion" => {
             if (options.kind.isPaper()) try preparePaper(allocator, io, options);
@@ -321,13 +340,10 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 if (byte == ':') try escaped.append(allocator, '\\');
                 try escaped.append(allocator, byte);
             }
-            // Generating the real terrain loads a thousand chunks at once, and a tick waiting on them
-            // can pass the minute after which vanilla's watchdog stops the server. It is not
-            // measured, so the watchdog is off then.
             const world = if (flat)
                 try std.fmt.allocPrint(allocator, "level-type=minecraft\\:flat\ngenerator-settings={s}\ngenerate-structures=false\n", .{escaped.items})
             else
-                try std.fmt.allocPrint(allocator, "level-seed={s}\n{s}", .{ terrain_seed, if (options.terrain == .generate) "max-tick-time=-1\n" else "" });
+                try std.fmt.allocPrint(allocator, "level-seed={s}\n", .{terrain_seed});
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "server.properties"), .data = try std.fmt.allocPrint(allocator,
                 \\online-mode=false
                 \\enforce-secure-profile=false
@@ -339,9 +355,15 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\simulation-distance={d}
                 \\max-players={d}
                 \\allow-flight=true
-                \\
-            , .{ config.port, world, scenario.view_distance, config.simulation_distance, config.maxPlayers(options.players) }) });
-            if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/vanilla/world"), try path(allocator, options.directory, "world"));
+                \\{s}
+            , .{
+                config.port, world, scenario.view_distance, config.simulation_distance, config.maxPlayers(options.players),
+                // Pregenerating loads a thousand chunks at once, and a tick waiting on them can pass
+                // the minute after which vanilla's watchdog stops the server. It is not measured,
+                // so the watchdog is off then.
+                if (options.generating) "max-tick-time=-1\n" else "",
+            }) });
+            if (!options.generating) try copy(allocator, io, vanilla_world, try path(allocator, options.directory, "world"));
         },
         .@"lightning-rod" => {
             try cwd.createDirPath(io, options.metrics);
@@ -349,7 +371,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             try cwd.symLink(io, options.metrics, try path(allocator, options.directory, config.metrics), .{ .is_directory = true });
             // The import holds the world and the caches it prebuilt, as vanilla's region files
             // hold its light.
-            if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/lightning-rod/."), options.directory);
+            try copy(allocator, io, try path(allocator, options.root, try path(allocator, try options.terrain.directory(allocator, "lightning-rod"), ".")), options.directory);
         },
         .pumpkin => {
             // Pumpkin reads its settings from the directory it runs in and fills in every one left
@@ -370,12 +392,8 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\enabled = false
                 \\
             , .{ terrain_seed, config.port, config.maxPlayers(options.players), scenario.view_distance, config.simulation_distance }) });
-            if (flat) {
-                // Pumpkin takes its flat layers from vanilla's world generation settings.
-                const data = try path(allocator, options.directory, "world/data/minecraft");
-                try cwd.createDirPath(io, data);
-                try std.Io.Dir.copyFile(cwd, try path(allocator, options.root, "servers/build/flat/world_gen_settings.dat"), cwd, try path(allocator, data, "world_gen_settings.dat"), io, .{});
-            } else if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/vanilla/world"), try path(allocator, options.directory, "world"));
+            // Vanilla's world, whose generation settings also give Pumpkin its flat layers.
+            try copy(allocator, io, vanilla_world, try path(allocator, options.directory, "world"));
         },
         .steel => {
             const config_directory = try path(allocator, options.directory, "config");
@@ -392,8 +410,8 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             text = try setting(allocator, text, "use_favicon", "false");
             text = try setting(allocator, text, "threshold", "256");
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, config_directory, "config.toml"), .data = text });
-            // SteelMC reads no vanilla worlds, so its real terrain is the same seed and the same
-            // square of chunks, generated by itself once before any run.
+            // SteelMC reads no vanilla worlds, so it starts from the same square of chunks,
+            // generated by itself once before any run.
             const world = if (flat)
                 \\generator = "minecraft:flat"
                 \\default = true
@@ -426,7 +444,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\name = "overworld"
                 \\{s}
             , .{ terrain_seed, world }) });
-            if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/steel/saves"), try path(allocator, options.directory, "saves"));
+            if (!options.generating) try copy(allocator, io, try path(allocator, options.root, try path(allocator, try options.terrain.directory(allocator, "steel"), "saves")), try path(allocator, options.directory, "saves"));
         },
     }
 }

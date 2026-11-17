@@ -19,8 +19,6 @@ pub const world = "world";
 /// Where Lightning Rod exports its tick samples, a link the bench makes to memory off the disk
 /// being measured.
 pub const metrics = "metrics";
-/// Chunks out from spawn that the real terrain world covers, as setup pregenerates it.
-pub const terrain_radius = 64;
 
 /// Blocks between neighbouring cows in `cows`, so 4096 cover a field 128 blocks across, inside
 /// the view and simulation distance of the player in its middle.

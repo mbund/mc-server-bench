@@ -11,8 +11,11 @@ else
   servers=(vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion)
 fi
 out=runs/standard
-# CI builds every server in jobs of its own and hands the scenario jobs the results.
-[ -n "${MC_SERVER_BENCH_BUILT:-}" ] || ./setup.sh bench "${servers[@]}"
+# The worlds runs start from, and SteelMC's own when it runs. CI builds every server and world in
+# jobs of their own and hands the scenario jobs the results.
+worlds=(terrain terrain-wide)
+if [[ " ${servers[*]} " == *" steel "* ]]; then worlds+=(terrain-steel); fi
+[ -n "${MC_SERVER_BENCH_BUILT:-}" ] || ./setup.sh bench "${worlds[@]}" "${servers[@]}"
 
 # Measures every server in turn with the same harness options, past any run that fails.
 measure() {

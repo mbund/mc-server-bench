@@ -19,7 +19,8 @@ runs:
         merge-multiple: true
     - shell: bash
       run: |
-        for archive in *.tar.gz; do tar -xzf "$archive"; done
+        # Each archive goes once unpacked, as the worlds would not all fit on the disk twice.
+        for archive in *.tar.gz; do tar -xzf "$archive" && rm "$archive"; done
         MC_SERVER_BENCH_BUILT=1 "scenarios/${{ inputs.scenario }}.sh"
     - uses: actions/upload-artifact@v7
       with:

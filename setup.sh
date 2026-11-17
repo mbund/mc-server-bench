@@ -2,7 +2,7 @@
 # Builds the servers named, or every one, at its pinned version, with the bench and the worlds
 # they read. Steps already done are skipped. `terrain` builds only the worlds, which CI makes once
 # and shares between its jobs, and `bench` only the bench.
-# Usage: ./setup.sh [vanilla|lightning-rod|pumpkin|steel|paper|paper-antixray-1|fabric|fabric-occlusion|terrain|terrain-steel|bench]...
+# Usage: ./setup.sh [vanilla|lightning-rod|pumpkin|steel|paper|paper-antixray-1|fabric|fabric-occlusion|terrain|terrain-wide|terrain-steel|bench]...
 set -euo pipefail
 cd "$(dirname "$0")"
 # The flake's lock pins every toolchain, so local builds happen inside its shell. CI installs the
@@ -11,7 +11,7 @@ if [ -z "${MC_SERVER_BENCH_SHELL:-}" ]; then exec nix develop --command "$0" "$@
 root=$PWD
 build=$root/servers/build
 mkdir -p "$build/versions"
-targets=" ${*:-bench vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion} "
+targets=" ${*:-bench terrain terrain-wide vanilla lightning-rod pumpkin steel terrain-steel paper paper-antixray-1 fabric fabric-occlusion} "
 wants() {
   for name in "$@"; do [[ $targets == *" $name "* ]] && return 0; done
   return 1
@@ -32,7 +32,7 @@ if wants bench terrain; then zig build -Drelease "$cpu"; fi
 # Vanilla 26.2, checked against the hash Mojang publishes. It also generates the worlds.
 jar=servers/vanilla/server.jar
 sha=823e2250d24b3ddac457a60c92a6a941943fcd6a
-if wants vanilla terrain lightning-rod pumpkin paper paper-antixray-1 fabric fabric-occlusion; then
+if wants vanilla terrain terrain-wide lightning-rod pumpkin paper paper-antixray-1 fabric fabric-occlusion; then
   if ! echo "$sha  $jar" | sha1sum --check --status 2>/dev/null; then
     mkdir -p servers/vanilla
     curl -fsSL -o "$jar" "https://piston-data.mojang.com/v1/objects/$sha/server.jar"
@@ -46,53 +46,41 @@ if wants vanilla terrain lightning-rod pumpkin paper paper-antixray-1 fabric fab
   fi
 fi
 
-# The real terrain world, which vanilla generates once from a fixed seed and every server but
-# SteelMC reads. SteelMC reads no vanilla worlds and generates the same chunks itself, below.
-if wants terrain vanilla lightning-rod pumpkin paper paper-antixray-1 fabric fabric-occlusion && [ ! -d "$build/terrain/vanilla/world" ]; then
+# The worlds runs start from, pregenerated once so no run generates terrain: real terrain from the
+# seed and flat terrain, each a square of radius 64 chunks, and wide flat terrain far enough out
+# for the views of 256 players spread apart. Vanilla generates them for every server reading
+# vanilla worlds, Lightning Rod imports them, and SteelMC generates the same chunks itself, below.
+# `terrain` makes vanilla's real and flat worlds, and `terrain-wide` its wide one.
+pregenerate() {
+  [ -d "$build/worlds/$2/$1/${3:-world}" ] && return
   [ -x zig-out/bin/bench ] || zig build -Drelease "$cpu"
-  ./zig-out/bin/bench pregen
+  ./zig-out/bin/bench pregen --server="$1" --terrain="$2"
+}
+if wants terrain; then
+  pregenerate vanilla real
+  pregenerate vanilla flat
 fi
-
-# Pumpkin reads flat layers only from vanilla's world generation settings, so vanilla makes them
-# once from the same settings the bench gives it.
-if wants terrain pumpkin && [ ! -f "$build/flat/world_gen_settings.dat" ]; then
-  scratch=$(mktemp -d)
-  echo "eula=true" > "$scratch/eula.txt"
-  cat > "$scratch/server.properties" <<'EOF'
-online-mode=false
-server-port=25799
-level-type=minecraft\:flat
-generator-settings={"layers"\:[{"block"\:"minecraft\:stone","height"\:128},{"block"\:"minecraft\:grass_block","height"\:1}],"biome"\:"minecraft\:plains","structure_overrides"\:[]}
-generate-structures=false
-EOF
-  mkfifo "$scratch/console"
-  (cd "$scratch" && exec java -DbundlerRepoDir="$root/servers/vanilla/bundle" -jar "$root/$jar" --nogui < console > server.log) &
-  server=$!
-  exec 3> "$scratch/console"
-  # Commands sent before the world is ready fail, so stop waits for it.
-  until grep -q "Done (" "$scratch/server.log" 2>/dev/null; do sleep 1; done
-  echo stop >&3
-  exec 3>&-
-  wait "$server"
-  mkdir -p "$build/flat"
-  cp "$scratch/world/data/minecraft/world_gen_settings.dat" "$build/flat/"
-  rm -rf "$scratch"
+if wants terrain-wide; then
+  pregenerate vanilla wide
 fi
 
 # Lightning Rod, built from its packages by the bench as a server outside its repository would be,
-# and the real terrain imported with its caches built, as vanilla saves its light with the chunks.
+# and every world imported with its caches built, as vanilla saves its light with the chunks.
 if wants lightning-rod; then
   zig build -Drelease "$cpu" lightning-rod -p "$build/lightning-rod"
   record lightning-rod
-  # Another commit may read the caches of an earlier import as outdated and start cold, so the
-  # import is redone whenever the commit changes.
-  imported=$build/terrain/lightning-rod.commit
-  if [ ! -d "$build/terrain/lightning-rod" ] || ! cmp -s "$imported" "$build/versions/lightning-rod"; then
-    rm -rf "$build/terrain/lightning-rod"
-    (cd servers/lightning-rod/tools/world-import && zig build -Doptimize=ReleaseSafe "$cpu" -p "$build/world-import")
-    "$build/world-import/bin/world-import" --input "$build/terrain/vanilla/world" --output "$build/terrain/lightning-rod" --skip-unsupported --prewarm
-    cp "$build/versions/lightning-rod" "$imported"
-  fi
+  (cd servers/lightning-rod/tools/world-import && zig build -Doptimize=ReleaseSafe "$cpu" -p "$build/world-import")
+  for terrain in real flat wide; do
+    pregenerate vanilla "$terrain"
+    # Another commit may read the caches of an earlier import as outdated and start cold, so the
+    # import is redone whenever the commit changes.
+    output=$build/worlds/$terrain/lightning-rod
+    if [ ! -d "$output" ] || ! cmp -s "$output.version" "$build/versions/lightning-rod"; then
+      rm -rf "$output"
+      "$build/world-import/bin/world-import" --input "$build/worlds/$terrain/vanilla/world" --output "$output" --skip-unsupported --prewarm
+      cp "$build/versions/lightning-rod" "$output.version"
+    fi
+  done
 fi
 
 # Pumpkin, as its README builds it. Its generated data crate needs a deep stack to compile. Where
@@ -122,16 +110,18 @@ if wants steel; then
   record steel
 fi
 
-# SteelMC's real terrain: the same square of chunks around the origin that vanilla pregenerates
-# for every other server, generated by SteelMC from the same seed into its own format, again
-# whenever its build changes. `terrain-steel` makes only this, which CI does apart from building.
-if wants steel terrain-steel; then
-  generated=$build/terrain/steel.version
-  if [ ! -d "$build/terrain/steel/saves" ] || ! cmp -s "$generated" "$build/versions/steel"; then
-    [ -x zig-out/bin/bench ] || zig build -Drelease "$cpu"
-    ./zig-out/bin/bench pregen --server=steel
-    cp "$build/versions/steel" "$generated"
-  fi
+# SteelMC's worlds: the same squares of chunks that vanilla pregenerates for every other server,
+# generated by SteelMC into its own format, again whenever its build changes. CI makes them in a
+# job of their own, apart from building.
+if wants terrain-steel; then
+  for terrain in real flat wide; do
+    output=$build/worlds/$terrain/steel
+    if [ ! -d "$output" ] || ! cmp -s "$output.version" "$build/versions/steel"; then
+      rm -rf "$output"
+      pregenerate steel "$terrain" saves
+      cp "$build/versions/steel" "$output.version"
+    fi
+  done
 fi
 
 # Paper 26.2 build 135, checked against the hash its download service publishes. Its launcher

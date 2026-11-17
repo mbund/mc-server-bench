@@ -32,7 +32,8 @@ pub const Settings = struct {
     keep_worlds: bool = false,
     dump_frames: ?[]const u8 = null,
     /// Chunks out from the centre that `pregen` generates.
-    radius: i32 = config.terrain_radius,
+    /// The terrain's own unless given.
+    radius: ?i32 = null,
     /// Another dimension for `pregen` to generate into the existing world, like minecraft:the_nether.
     dimension: ?[]const u8 = null,
 };
@@ -89,7 +90,7 @@ fn usage() error{InvalidArguments} {
         \\  bench run --server=<name> --scenario=<name> [--terrain=flat|real] [--players=<count>] [--cows=<count>] [options]
         \\                                    measure one server in one scenario, adding its result to <out>/results.jsonl
         \\  bench report <directory> [--charts-url=<where the charts are published>]
-        \\  bench pregen [--server=vanilla|steel] [--radius=<chunks>] [--dimension=<name>]
+        \\  bench pregen [--server=vanilla|steel] [--terrain=flat|real|wide] [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate the real terrain world with vanilla, or add a dimension to it
         \\servers: vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion
         \\scenarios: idle wander spread explore build cows
@@ -128,7 +129,6 @@ fn parseOption(settings: *Settings, argument: []const u8) !void {
         settings.out = value;
     } else if (std.mem.eql(u8, name, "--terrain")) {
         settings.terrain = try parseName(server_module.Terrain, value);
-        if (settings.terrain == .generate) return error.InvalidArguments;
     } else if (std.mem.eql(u8, name, "--radius")) {
         settings.radius = try std.fmt.parseInt(i32, value, 10);
     } else if (std.mem.eql(u8, name, "--dimension")) {
@@ -795,14 +795,14 @@ fn traffic(allocator: std.mem.Allocator, swarm: *bot.Swarm) !TrafficSummary {
 /// Generates the real terrain world once with vanilla: a square of chunks around the centre,
 /// loaded a few hundred at a time until generation goes quiet, then saved. With a dimension, the
 /// square is added to that dimension of the existing world.
-/// Generates the real terrain: the same square of chunks around the origin, forced loaded a few
-/// tiles at a time until generation quiets. Vanilla generates the world every server reading
+/// Generates a world runs start from: the same square of chunks around the origin, forced loaded
+/// a few tiles at a time until generation quiets. Vanilla generates the world every server reading
 /// vanilla worlds starts from, and SteelMC, which reads none, the same chunks in its own.
 fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings) !void {
     const kind = settings.server orelse .vanilla;
     if (kind != .vanilla and kind != .steel) return error.InvalidArguments;
     if (kind == .steel and settings.dimension != null) return error.InvalidArguments;
-    const directory = try std.fmt.allocPrint(allocator, "servers/build/terrain/{s}", .{@tagName(kind)});
+    const directory = try settings.terrain.directory(allocator, @tagName(kind));
     if (settings.dimension == null) std.Io.Dir.cwd().deleteTree(io, directory) catch {};
     const prefix = if (settings.dimension) |name| try std.fmt.allocPrint(allocator, "execute in {s} run ", .{name}) else "";
     if (bot.probe(config.port)) return error.PortInUse;
@@ -813,7 +813,8 @@ fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: 
         .players = 1,
         .cpus = settings.server_cpus.?,
         .metrics = "",
-        .terrain = .generate,
+        .terrain = settings.terrain,
+        .generating = true,
     });
     var stopped = false;
     defer if (!stopped) {
@@ -824,8 +825,10 @@ fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: 
         try io.sleep(.fromMilliseconds(200), .awake);
     }
     // Forceload takes at most 256 chunks a command, so the square goes in tiles of 16 by 16.
-    const tiles = @divFloor(settings.radius + 15, 16);
-    const batch = 4;
+    const tiles = @divFloor((settings.radius orelse settings.terrain.radius()) + 15, 16);
+    // Tiles forced at once: each batch waits for generation to quiet, which the wide world would
+    // otherwise spend most of its time on.
+    const batch = 16;
     // Each batch is released tile by tile, which every server's forceload takes.
     var pending: [batch][2]i32 = undefined;
     var pending_count: usize = 0;

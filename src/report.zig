@@ -63,7 +63,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
     );
 
     try startupSection(allocator, io, writer, directory, charts_url, runs.items);
-    for ([_]server_module.Terrain{ .real, .flat }) |terrain| for (std.enums.values(scenario.Kind)) |kind| {
+    for ([_]server_module.Terrain{ .real, .flat, .wide }) |terrain| for (std.enums.values(scenario.Kind)) |kind| {
         var counts: std.ArrayList(u64) = .empty;
         for (runs.items) |run| {
             if (!matches(run, terrain, kind)) continue;
@@ -335,6 +335,6 @@ fn terrainName(terrain: server_module.Terrain) []const u8 {
     return switch (terrain) {
         .real => "Real",
         .flat => "Flat",
-        .generate => unreachable,
+        .wide => "Wide flat",
     };
 }

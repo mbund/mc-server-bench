@@ -20,8 +20,8 @@ env:
   MC_SERVER_BENCH_ZIG_CPU: x86_64_v3
 
 jobs:
-  # The harness, and the worlds every server reads: the real terrain vanilla pregenerates and the
-  # flat settings Pumpkin reads.
+  # The harness, and the worlds vanilla pregenerates for every server that reads vanilla worlds:
+  # real and flat terrain, and the wide flat world only spread runs on, kept apart as it is large.
   terrain:
     runs-on: ubuntu-26.04
     outputs:
@@ -36,15 +36,12 @@ jobs:
       - id: keys
         run: |
           echo "lightning-rod=$(git rev-parse HEAD:servers/lightning-rod)" >> "$GITHUB_OUTPUT"
-          # The worlds depend only on the vanilla release and the settings and code that generate
-          # them, of which setup.sh holds the release and the flat layers.
-          echo "terrain=$( (grep -E '^sha=|generator-settings|level-type' setup.sh; cat src/main.zig src/server.zig src/config.zig) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+          # The worlds depend only on the vanilla release and the code that generates them.
+          echo "terrain=$( (grep -E '^sha=' setup.sh; cat src/main.zig src/server.zig src/config.zig) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v5
         with:
-          path: |
-            servers/build/terrain/vanilla
-            servers/build/flat
-          key: terrain-${{ steps.keys.outputs.terrain }}
+          path: servers/build/worlds/*/vanilla
+          key: worlds-vanilla-${{ steps.keys.outputs.terrain }}
       # Zig's compile caches, so an unchanged harness builds in seconds and a changed one rebuilds
       # only what changed since the last.
       - uses: actions/cache@v5
@@ -54,13 +51,14 @@ jobs:
             ~/.cache/zig
           key: zig-harness-${{ steps.keys.outputs.lightning-rod }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
           restore-keys: zig-harness-
-      - run: ./setup.sh bench terrain
+      - run: ./setup.sh bench terrain terrain-wide
       # Vanilla's own account of a failed world generation, which stays on the runner otherwise.
       - if: failure()
-        run: tail -n 200 servers/build/terrain/vanilla/server.log
+        run: tail -n 200 servers/build/worlds/*/vanilla/server.log
       - run: |
           tar -czf harness.tar.gz zig-out/bin/bench
-          tar -czf terrain.tar.gz servers/build/terrain/vanilla servers/build/flat
+          tar -czf terrain.tar.gz servers/build/worlds/real/vanilla servers/build/worlds/flat/vanilla
+          tar -czf wide-vanilla.tar.gz servers/build/worlds/wide/vanilla
       - uses: actions/upload-artifact@v7
         with:
           name: harness
@@ -71,11 +69,16 @@ jobs:
           name: terrain
           path: terrain.tar.gz
           retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wide-vanilla
+          path: wide-vanilla.tar.gz
+          retention-days: 1
 
   # Each build is reused for as long as its submodule's commit and the files that decide it stay
   # the same, and only the build itself is skipped when it is.
 
-  # Lightning Rod, and the real terrain imported with its caches built.
+  # Lightning Rod, and every world imported with its caches built, the wide one kept apart.
   build-lightning-rod:
     needs: terrain
     runs-on: ubuntu-26.04
@@ -86,7 +89,9 @@ jobs:
       - id: cache
         uses: actions/cache@v5
         with:
-          path: build-lightning-rod.tar.gz
+          path: |
+            build-lightning-rod.tar.gz
+            wide-lightning-rod.tar.gz
           key: ${{ steps.key.outputs.key }}
       - uses: ./.github/actions/zig
       # Zig's compile caches from the last Lightning Rod build, so a new commit rebuilds only what
@@ -100,16 +105,24 @@ jobs:
           restore-keys: zig-lightning-rod-
       - uses: actions/download-artifact@v8
         with:
-          name: terrain
+          pattern: "{terrain,wide-vanilla}"
+          merge-multiple: true
       - if: steps.cache.outputs.cache-hit != 'true'
         run: |
           tar -xzf terrain.tar.gz
+          tar -xzf wide-vanilla.tar.gz
           ./setup.sh lightning-rod
-          tar -czf build-lightning-rod.tar.gz servers/build/lightning-rod servers/build/terrain/lightning-rod servers/build/versions/lightning-rod
+          tar -czf build-lightning-rod.tar.gz servers/build/lightning-rod servers/build/versions/lightning-rod servers/build/worlds/real/lightning-rod* servers/build/worlds/flat/lightning-rod*
+          tar -czf wide-lightning-rod.tar.gz servers/build/worlds/wide/lightning-rod*
       - uses: actions/upload-artifact@v7
         with:
           name: build-lightning-rod
           path: build-lightning-rod.tar.gz
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wide-lightning-rod
+          path: wide-lightning-rod.tar.gz
           retention-days: 1
 
   build-pumpkin:
@@ -125,12 +138,8 @@ jobs:
         with:
           path: build-pumpkin.tar.gz
           key: ${{ steps.key.outputs.key }}
-      - uses: actions/download-artifact@v8
-        with:
-          name: terrain
       - if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          tar -xzf terrain.tar.gz
           ./setup.sh pumpkin
           tar -czf build-pumpkin.tar.gz servers/pumpkin/target/release/pumpkin servers/build/versions/pumpkin
       - uses: actions/upload-artifact@v7
@@ -154,12 +163,8 @@ jobs:
           key: ${{ steps.key.outputs.key }}
       # SteelMC links with lld.
       - run: sudo apt-get update && sudo apt-get install -y lld
-      - uses: actions/download-artifact@v8
-        with:
-          name: terrain
       - if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          tar -xzf terrain.tar.gz
           ./setup.sh steel
           tar -czf build-steel.tar.gz servers/steel/target/release/steel servers/steel/package-content servers/build/versions/steel
       - uses: actions/upload-artifact@v7
@@ -185,12 +190,8 @@ jobs:
         with:
           distribution: temurin
           java-version: 25
-      - uses: actions/download-artifact@v8
-        with:
-          name: terrain
       - if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          tar -xzf terrain.tar.gz
           ./setup.sh vanilla paper paper-antixray-1 fabric fabric-occlusion
           tar -czf build-java.tar.gz servers/vanilla servers/paper servers/fabric
       - uses: actions/upload-artifact@v7
@@ -199,9 +200,9 @@ jobs:
           path: build-java.tar.gz
           retention-days: 1
 
-  # SteelMC reads no vanilla worlds, so it generates the same square of real terrain itself. The
-  # world depends on what generates the vanilla one and on SteelMC's build, so it is kept apart
-  # from the build, which takes far longer and changes less.
+  # SteelMC reads no vanilla worlds, so it generates the same squares of chunks itself. The worlds
+  # depend on what generates the vanilla ones and on SteelMC's build, so they are kept apart from
+  # the build, which takes far longer and changes less. The wide one is kept apart as it is large.
   terrain-steel:
     needs: [terrain, build-steel]
     runs-on: ubuntu-26.04
@@ -219,17 +220,22 @@ jobs:
       - id: cache
         uses: actions/cache@v5
         with:
-          path: |
-            servers/build/terrain/steel
-            servers/build/terrain/steel.version
+          path: servers/build/worlds/*/steel*
           key: ${{ steps.key.outputs.key }}
       - if: steps.cache.outputs.cache-hit != 'true'
         run: ./setup.sh terrain-steel
-      - run: tar -czf terrain-steel.tar.gz servers/build/terrain/steel servers/build/terrain/steel.version
+      - run: |
+          tar -czf terrain-steel.tar.gz servers/build/worlds/real/steel* servers/build/worlds/flat/steel*
+          tar -czf wide-steel.tar.gz servers/build/worlds/wide/steel*
       - uses: actions/upload-artifact@v7
         with:
           name: terrain-steel
           path: terrain-steel.tar.gz
+          retention-days: 1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wide-steel
+          path: wide-steel.tar.gz
           retention-days: 1
 
   # Every scenario on a machine of its own, every server in turn.
@@ -260,6 +266,11 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
+      # The wide flat world, which only spread runs on.
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wide-*
+          merge-multiple: true
       - uses: ./.github/actions/scenario
         with:
           scenario: spread
