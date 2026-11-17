@@ -43,15 +43,16 @@ comptime {
     if (std.enums.values(Server).len > colors.len) @compileError("every server needs a color of its own");
 }
 
-const width = 960;
-const panel_width = 470;
+const margin = 16;
+const panel_width = 480;
 const panel_height = 300;
 const gap = 20;
+const width = 2 * margin + 2 * panel_width + gap;
 const header = 64;
 /// Inside a panel: room for the title above, the decade labels left, the player counts below and
-/// the server names right.
+/// the server names right, which fit the longest name, 16 characters of 12 pixel monospace.
 const plot_left = 52;
-const plot_right = 118;
+const plot_right = 132;
 const plot_top = 34;
 const plot_bottom = 40;
 const label_spacing = 13;
@@ -68,16 +69,16 @@ pub fn svg(allocator: std.mem.Allocator, title: []const u8, axis: []const u8, co
         \\<style>
         \\.bg{{fill:#ffffff}} .grid{{stroke:#d1d9e0}} .axis{{stroke:#818b98}} .t1{{fill:#1f2328}} .t2{{fill:#59636e}} .ring{{stroke:#ffffff}}
         \\@media (prefers-color-scheme: dark){{.bg{{fill:#0d1117}} .grid{{stroke:#2f353d}} .axis{{stroke:#656c76}} .t1{{fill:#f0f6fc}} .t2{{fill:#9198a1}} .ring{{stroke:#0d1117}}}}
-        \\text{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:12px}}
+        \\text{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12px}}
         \\.title{{font-size:16px;font-weight:600}} .panel{{font-size:13px;font-weight:600}}
         \\</style>
         \\<rect class="bg" width="100%" height="100%"/>
-        \\<text class="t1 title" x="16" y="24">{s}</text>
+        \\<text class="t1 title" x="{d}" y="24">{s}</text>
         \\
-    , .{ width, height, width, height, title });
+    , .{ width, height, width, height, margin, title });
     try legend(writer, panels);
     for (panels, 0..) |panel, index| {
-        const x: f64 = @floatFromInt(16 + (index % 2) * (panel_width + gap));
+        const x: f64 = @floatFromInt(margin + (index % 2) * (panel_width + gap));
         const y: f64 = @floatFromInt(header + (index / 2) * (panel_height + gap));
         try drawPanel(allocator, writer, x, y, axis, counts, panel);
     }
@@ -87,7 +88,7 @@ pub fn svg(allocator: std.mem.Allocator, title: []const u8, axis: []const u8, co
 
 /// Every server in any panel, in the fixed order, with its color.
 fn legend(writer: *std.Io.Writer, panels: []const Panel) !void {
-    var x: f64 = 16;
+    var x: f64 = margin;
     for (std.enums.values(Server), 0..) |server, slot| {
         const present = found: {
             for (panels) |panel| for (panel.series) |series| if (series.server == server) break :found true;
@@ -159,12 +160,12 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
     try writer.writeByte('\n');
 
     // Each server's name beside its last result, moved apart where names would overlap.
-    const Label = struct { server: Server, x: f64, y: f64, anchor: f64 };
+    const Label = struct { server: Server, x: f64, y: f64 };
     var labels: std.ArrayList(Label) = .empty;
     for (panel.series) |series| {
         var index = series.values.len;
         while (index > 0) : (index -= 1) if (series.values[index - 1]) |v| {
-            try labels.append(allocator, .{ .server = series.server, .x = column(index - 1, counts.len, left, right) + 8, .y = scale(v, low, high, top, bottom) + 4, .anchor = scale(v, low, high, top, bottom) });
+            try labels.append(allocator, .{ .server = series.server, .x = column(index - 1, counts.len, left, right) + 8, .y = scale(v, low, high, top, bottom) + 4 });
             break;
         };
     }
@@ -188,8 +189,6 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
         limit = label.y - label_spacing;
     }
     for (labels.items) |label| {
-        // A name moved off its point keeps a thin line back to it.
-        if (@abs(label.y - 4 - label.anchor) > 3) try writer.print("<line class=\"axis\" x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke-width=\"0.75\"/>", .{ label.x - 3, label.anchor, label.x + 1, label.y - 4 });
         try writer.print("<text class=\"t1\" x=\"{d:.1}\" y=\"{d:.1}\">{s}</text>\n", .{ label.x, label.y, @tagName(label.server) });
     }
 }
