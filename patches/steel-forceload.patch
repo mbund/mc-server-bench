@@ -1,0 +1,156 @@
+diff --git a/steel-core/src/chunk/chunk_map/mod.rs b/steel-core/src/chunk/chunk_map/mod.rs
+index 5a37ecd74..0472a1845 100644
+--- a/steel-core/src/chunk/chunk_map/mod.rs
++++ b/steel-core/src/chunk/chunk_map/mod.rs
+@@ -1335,6 +1335,16 @@ impl ChunkMap {
+     pub fn place_ender_pearl_ticket(&self, chunk: ChunkPos) {
+         self.scheduling.add_or_refresh_ender_pearl_ticket(chunk);
+     }
++
++    /// Forces a chunk loaded and generated in full, as `/forceload add` does.
++    pub(crate) fn add_forced_ticket(&self, chunk: ChunkPos) {
++        self.scheduling.add_forced_ticket(chunk);
++    }
++
++    /// Releases a chunk `add_forced_ticket` forced, as `/forceload remove` does.
++    pub(crate) fn remove_forced_ticket(&self, chunk: ChunkPos) {
++        self.scheduling.remove_forced_ticket(chunk);
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/steel-core/src/chunk/chunk_scheduler.rs b/steel-core/src/chunk/chunk_scheduler.rs
+index d735bced3..17bb306e2 100644
+--- a/steel-core/src/chunk/chunk_scheduler.rs
++++ b/steel-core/src/chunk/chunk_scheduler.rs
+@@ -282,6 +282,11 @@ pub(crate) struct ChunkSchedulingCoordinator {
+     committed_receipt: AtomicU64,
+ }
+ 
++/// Vanilla's forced ticket, `ChunkMap.updateChunkForced`: the forced type with radius 2.
++fn forced_ticket() -> ChunkTicket {
++    ChunkTicket::for_full_chunk_radius(&steel_registry::vanilla_ticket_types::FORCED, 2)
++}
++
+ impl ChunkSchedulingCoordinator {
+     pub fn new(
+         ticket_storage: ChunkTicketStorage,
+@@ -374,6 +379,21 @@ impl ChunkSchedulingCoordinator {
+         ingress.record_changes(changes);
+     }
+ 
++    /// Adds vanilla's forced ticket, as `/forceload add` does: the chunk loads and generates in
++    /// full and stays until the ticket is removed.
++    pub(crate) fn add_forced_ticket(&self, pos: ChunkPos) {
++        let mut ingress = self.ticket_ingress.lock();
++        let changes = ingress.storage.add_ticket(pos, forced_ticket());
++        ingress.record_changes(changes);
++    }
++
++    /// Removes the ticket `add_forced_ticket` added, as `/forceload remove` does.
++    pub(crate) fn remove_forced_ticket(&self, pos: ChunkPos) {
++        let mut ingress = self.ticket_ingress.lock();
++        let changes = ingress.storage.remove_ticket(pos, forced_ticket());
++        ingress.record_changes(changes);
++    }
++
+     pub(crate) fn add_or_refresh_ender_pearl_ticket(&self, pos: ChunkPos) {
+         let mut ingress = self.ticket_ingress.lock();
+         let changes = ingress.storage.add_or_refresh_ender_pearl_ticket(pos);
+diff --git a/steel-core/src/command/builtins/mod.rs b/steel-core/src/command/builtins/mod.rs
+index 1b9c76461..65c2278b9 100644
+--- a/steel-core/src/command/builtins/mod.rs
++++ b/steel-core/src/command/builtins/mod.rs
+@@ -10,6 +10,7 @@ mod execute;
+ mod experience;
+ mod fill;
+ mod fly;
++mod forceload;
+ pub(crate) mod gamemode;
+ mod gamerule;
+ mod give;
+@@ -79,6 +80,7 @@ pub(crate) fn create_registered_dispatcher(
+     builder.register(experience::registration())?;
+     builder.register(fill::registration())?;
+     builder.register(fly::registration())?;
++    builder.register(forceload::registration())?;
+     builder.register(gamemode::registration()?)?;
+     builder.register(gamerule::registration())?;
+     builder.register(give::registration())?;
+diff --git a/steel-core/src/command/builtins/forceload.rs b/steel-core/src/command/builtins/forceload.rs
+new file mode 100644
+index 000000000..e6ebf1fae
+--- /dev/null
++++ b/steel-core/src/command/builtins/forceload.rs
+@@ -0,0 +1,71 @@
++//! Forced chunks: `/forceload add <from> [<to>]` and `/forceload remove <from> [<to>]`, which
++//! keep every chunk in the square between two columns loaded and generated in full until they
++//! are removed again.
++
++use steel_utils::{ChunkPos, Identifier};
++use text_components::TextComponent;
++
++use super::super::{
++    brigadier::{CommandNodeBuilder, CommandSyntaxError},
++    execution::{
++        CommandSource, SteelArgumentType, SteelCommandContext, SteelCommandRuntime, argument,
++        literal,
++    },
++    registration::CommandRegistration,
++};
++
++/// Vanilla's limit on the chunks one command changes.
++const MAX_CHUNKS: i64 = 256;
++
++pub(super) fn registration() -> CommandRegistration<CommandSource> {
++    CommandRegistration::new(Identifier::vanilla_static("forceload"), |_| command())
++}
++
++fn command() -> CommandNodeBuilder<CommandSource, SteelCommandRuntime> {
++    literal("forceload")
++        .then(literal("add").then(
++            argument("from", SteelArgumentType::vec2(false))
++                .executes(|context| change(context, "from", true))
++                .then(argument("to", SteelArgumentType::vec2(false)).executes(|context| change(context, "to", true))),
++        ))
++        .then(literal("remove").then(
++            argument("from", SteelArgumentType::vec2(false))
++                .executes(|context| change(context, "from", false))
++                .then(argument("to", SteelArgumentType::vec2(false)).executes(|context| change(context, "to", false))),
++        ))
++}
++
++/// The chunk holding a column given in block coordinates.
++fn chunk_of(context: &SteelCommandContext<CommandSource>, name: &str) -> Result<(i32, i32), CommandSyntaxError> {
++    let position = context.coordinates(name)?.position(context.source());
++    Ok(((position.x.floor() as i32) >> 4, (position.z.floor() as i32) >> 4))
++}
++
++fn change(context: &SteelCommandContext<CommandSource>, to: &str, add: bool) -> Result<i32, CommandSyntaxError> {
++    let from = chunk_of(context, "from")?;
++    let to = chunk_of(context, to)?;
++    let (min_x, max_x) = (from.0.min(to.0), from.0.max(to.0));
++    let (min_z, max_z) = (from.1.min(to.1), from.1.max(to.1));
++    let count = i64::from(max_x - min_x + 1) * i64::from(max_z - min_z + 1);
++    if count > MAX_CHUNKS {
++        return Err(CommandSyntaxError::dynamic(TextComponent::plain(format!(
++            "Too many chunks in the specified area (maximum {MAX_CHUNKS}, specified {count})"
++        ))));
++    }
++    let chunk_map = &context.source().world().chunk_map;
++    for x in min_x..=max_x {
++        for z in min_z..=max_z {
++            if add {
++                chunk_map.add_forced_ticket(ChunkPos::new(x, z));
++            } else {
++                chunk_map.remove_forced_ticket(ChunkPos::new(x, z));
++            }
++        }
++    }
++    let verb = if add { "Marked" } else { "Unmarked" };
++    let message = TextComponent::plain(format!(
++        "{verb} {count} chunks from [{min_x}, {min_z}] to [{max_x}, {max_z}] to be force loaded"
++    ));
++    context.source().send_success(&message, true);
++    Ok(count as i32)
++}

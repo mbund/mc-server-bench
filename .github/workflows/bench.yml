@@ -22,6 +22,8 @@ env:
 jobs:
   terrain:
     runs-on: ubuntu-26.04
+    outputs:
+      terrain: ${{ steps.keys.outputs.terrain }}
     steps:
       - uses: actions/checkout@v7
       # Zig 0.17.0, which the flake pins, checked against the hash ziglang.org publishes.
@@ -99,7 +101,7 @@ jobs:
             targets: steel
             submodules: steel
             section: steel
-            inputs: patches/steel-console-stdin.patch
+            inputs: patches/steel-console-stdin.patch patches/steel-forceload.patch
             outputs: servers/steel/target/release/steel servers/steel/package-content servers/build/versions/steel
           - name: java
             targets: vanilla paper paper-antixray-1 fabric fabric-occlusion
@@ -158,9 +160,42 @@ jobs:
           path: build-${{ matrix.name }}.tar.gz
           retention-days: 1
 
+  # SteelMC reads no vanilla worlds, so it generates the same square of real terrain itself. The
+  # world depends on what generates the vanilla one and on SteelMC's build, so it is kept apart
+  # from the build, which takes far longer and changes less.
+  steel-terrain:
+    needs: [terrain, build]
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "{harness,build-steel}"
+          merge-multiple: true
+      - id: key
+        run: |
+          tar -xzf harness.tar.gz
+          tar -xzf build-steel.tar.gz
+          echo "key=terrain-steel-${{ needs.terrain.outputs.terrain }}-$(sha256sum servers/steel/target/release/steel | cut -c1-20)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            servers/build/terrain/steel
+            servers/build/terrain/steel.version
+          key: ${{ steps.key.outputs.key }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: ./setup.sh terrain-steel
+      - run: tar -czf terrain-steel.tar.gz servers/build/terrain/steel servers/build/terrain/steel.version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: terrain-steel
+          path: terrain-steel.tar.gz
+          retention-days: 1
+
   bench:
     name: bench ${{ matrix.scenario }}
-    needs: build
+    needs: [build, steel-terrain]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     strategy:
@@ -175,7 +210,7 @@ jobs:
           java-version: 25
       - uses: actions/download-artifact@v8
         with:
-          pattern: "{harness,terrain,build-*}"
+          pattern: "{harness,terrain,terrain-steel,build-*}"
           merge-multiple: true
       - run: for archive in *.tar.gz; do tar -xzf "$archive"; done
       - run: MC_SERVER_BENCH_BUILT=1 ./run.sh --scenarios=${{ matrix.scenario }}

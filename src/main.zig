@@ -113,7 +113,7 @@ fn usage() error{InvalidArguments} {
         \\  bench run --server=<name> --scenario=<name> --players=<count> [options]
         \\  bench sweep --servers=a,b --scenarios=a,b --players=1,2,5 [options]
         \\  bench report <directory> [--chart-urls=<file of "name url" lines>]
-        \\  bench pregen [--radius=<chunks>] [--dimension=<name>]
+        \\  bench pregen [--server=vanilla|steel] [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate the real terrain world with vanilla, or add a dimension to it
         \\servers: vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion
         \\scenarios: idle wander spread explore build cows
@@ -805,13 +805,19 @@ fn traffic(allocator: std.mem.Allocator, swarm: *bot.Swarm) !TrafficSummary {
 /// Generates the real terrain world once with vanilla: a square of chunks around the centre,
 /// loaded a few hundred at a time until generation goes quiet, then saved. With a dimension, the
 /// square is added to that dimension of the existing world.
+/// Generates the real terrain: the same square of chunks around the origin, forced loaded a few
+/// tiles at a time until generation quiets. Vanilla generates the world every server reading
+/// vanilla worlds starts from, and SteelMC, which reads none, the same chunks in its own.
 fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings) !void {
-    const directory = "servers/build/terrain/vanilla";
+    const kind: server_module.Kind = if (settings.servers.len == 1) settings.servers[0] else .vanilla;
+    if (kind != .vanilla and kind != .steel) return error.InvalidArguments;
+    if (kind == .steel and settings.dimension != null) return error.InvalidArguments;
+    const directory = try std.fmt.allocPrint(allocator, "servers/build/terrain/{s}", .{@tagName(kind)});
     if (settings.dimension == null) std.Io.Dir.cwd().deleteTree(io, directory) catch {};
     const prefix = if (settings.dimension) |name| try std.fmt.allocPrint(allocator, "execute in {s} run ", .{name}) else "";
     if (bot.probe(config.port)) return error.PortInUse;
     const server = try Server.start(allocator, io, .{
-        .kind = .vanilla,
+        .kind = kind,
         .root = root,
         .directory = directory,
         .players = 1,
@@ -830,7 +836,9 @@ fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: 
     // Forceload takes at most 256 chunks a command, so the square goes in tiles of 16 by 16.
     const tiles = @divFloor(settings.radius + 15, 16);
     const batch = 4;
-    var pending: usize = 0;
+    // Each batch is released tile by tile, which every server's forceload takes.
+    var pending: [batch][2]i32 = undefined;
+    var pending_count: usize = 0;
     var tile_x = -tiles;
     while (tile_x < tiles) : (tile_x += 1) {
         var tile_z = -tiles;
@@ -838,21 +846,24 @@ fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: 
             const x = tile_x * 256;
             const z = tile_z * 256;
             try server.console(try std.fmt.allocPrint(allocator, "{s}forceload add {d} {d} {d} {d}", .{ prefix, x, z, x + 255, z + 255 }));
-            pending += 1;
-            if (pending == batch or (tile_x == tiles - 1 and tile_z == tiles - 1)) {
+            pending[pending_count] = .{ x, z };
+            pending_count += 1;
+            if (pending_count == batch or (tile_x == tiles - 1 and tile_z == tiles - 1)) {
                 try quiet(io, server);
-                try server.console(try std.fmt.allocPrint(allocator, "{s}forceload remove all", .{prefix}));
-                pending = 0;
+                for (pending[0..pending_count]) |tile| try server.console(try std.fmt.allocPrint(allocator, "{s}forceload remove {d} {d} {d} {d}", .{ prefix, tile[0], tile[1], tile[0] + 255, tile[1] + 255 }));
+                pending_count = 0;
                 std.log.info("generated through tile {d}, {d}", .{ tile_x, tile_z });
             }
         }
     }
-    try server.console("save-all flush");
+    // SteelMC saves when it stops and has no save command.
+    if (kind == .vanilla) try server.console("save-all flush");
     try quiet(io, server);
     const ending = try server.stop(600);
     stopped = true;
     if (!ending.clean) return error.ServerKilled;
-    std.log.info("world of {d:.0} MB in {s}/world", .{ megabytes(try diskUsage(allocator, io, directory ++ "/world")), directory });
+    const world = try std.fs.path.join(allocator, &.{ directory, kind.worldPaths()[0] });
+    std.log.info("world of {d:.0} MB in {s}", .{ megabytes(try diskUsage(allocator, io, world)), world });
 }
 
 /// Waits until the server keeps under half a core for three seconds running.

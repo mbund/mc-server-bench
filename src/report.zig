@@ -193,8 +193,8 @@ fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writ
         \\
         \\**Startup** is from launching the server to its first answer to a status request, the median
         \\of its idle runs. **World on disk** is everything the server keeps for its world after the
-        \\idle run with the fewest players, caches included. On real terrain every server but SteelMC starts
-        \\from the same pregenerated world, which SteelMC generates itself.
+        \\idle run with the fewest players, caches included. On real terrain every server starts from the
+        \\same square of pregenerated chunks, which SteelMC, reading no vanilla worlds, generates itself.
         \\
         \\![Startup time and world size on disk of every server, flat and real terrain, on log scales]({s})
         \\
