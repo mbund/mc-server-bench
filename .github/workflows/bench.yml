@@ -16,6 +16,8 @@ env:
   MC_SERVER_BENCH_SHELL: 1
   # Lightning Rod's build needs its Zig cache outside the repository.
   ZIG_LOCAL_CACHE_DIR: /tmp/mc-server-bench-zig
+  # Zig builds run on other machines than the ones that built them, all of which have AVX2.
+  MC_SERVER_BENCH_ZIG_CPU: x86_64_v3
 
 jobs:
   terrain:

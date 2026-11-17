@@ -21,9 +21,13 @@ record() {
   git -C "servers/$1" rev-parse --short=12 HEAD > "$build/versions/$1"
 }
 
+# Zig builds for this machine unless told a CPU model, as CI does, which builds on one machine and
+# runs on others.
+cpu=-Dcpu=${MC_SERVER_BENCH_ZIG_CPU:-native}
+
 # The bench builds against Lightning Rod's protocol packages, and so does its Lightning Rod server.
 git submodule update --init servers/lightning-rod
-if wants bench terrain; then zig build -Drelease; fi
+if wants bench terrain; then zig build -Drelease "$cpu"; fi
 
 # Vanilla 26.2, checked against the hash Mojang publishes. It also generates the worlds.
 jar=servers/vanilla/server.jar
@@ -45,7 +49,7 @@ fi
 # The real terrain world, which vanilla generates once from a fixed seed and every server but
 # SteelMC reads. SteelMC reads no vanilla worlds and generates the same seed itself.
 if wants terrain vanilla lightning-rod pumpkin paper paper-antixray-1 fabric fabric-occlusion && [ ! -d "$build/terrain/vanilla/world" ]; then
-  [ -x zig-out/bin/bench ] || zig build -Drelease
+  [ -x zig-out/bin/bench ] || zig build -Drelease "$cpu"
   ./zig-out/bin/bench pregen
 fi
 
@@ -78,14 +82,14 @@ fi
 # Lightning Rod, built from its packages by the bench as a server outside its repository would be,
 # and the real terrain imported with its caches built, as vanilla saves its light with the chunks.
 if wants lightning-rod; then
-  zig build -Drelease lightning-rod -p "$build/lightning-rod"
+  zig build -Drelease "$cpu" lightning-rod -p "$build/lightning-rod"
   record lightning-rod
   # Another commit may read the caches of an earlier import as outdated and start cold, so the
   # import is redone whenever the commit changes.
   imported=$build/terrain/lightning-rod.commit
   if [ ! -d "$build/terrain/lightning-rod" ] || ! cmp -s "$imported" "$build/versions/lightning-rod"; then
     rm -rf "$build/terrain/lightning-rod"
-    (cd servers/lightning-rod/tools/world-import && zig build -Doptimize=ReleaseSafe -p "$build/world-import")
+    (cd servers/lightning-rod/tools/world-import && zig build -Doptimize=ReleaseSafe "$cpu" -p "$build/world-import")
     "$build/world-import/bin/world-import" --input "$build/terrain/vanilla/world" --output "$build/terrain/lightning-rod" --skip-unsupported --prewarm
     cp "$build/versions/lightning-rod" "$imported"
   fi
