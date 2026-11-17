@@ -4,9 +4,11 @@
 pub const port: u16 = 25700;
 /// The view distance bots ask for and servers are configured with, and the simulation distance.
 pub const view_distance = 10;
-/// Room for every bot of a run and one more, at least 20, the same every server gets.
+/// Room for exactly the bots of a run, the same every server gets. Lightning Rod sets aside
+/// everything for every player it has room for, so room for more would cost it what it costs the
+/// others only once used.
 pub fn maxPlayers(players: usize) usize {
-    return @max(20, players + 1);
+    return players;
 }
 /// Where Lightning Rod keeps its world, beside its caches, relative to its directory.
 pub const world = "world";
