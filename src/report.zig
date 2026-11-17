@@ -1,6 +1,6 @@
-//! Writes the results of sweeps as one Markdown file: the servers measured, then for every terrain
-//! and scenario its machine, its charts over player counts and a table for every player count with
-//! a row per server.
+//! Writes the results of runs as one Markdown file: the servers measured, then for every terrain
+//! and scenario its machine, its charts over its counts and a table for every count with a row per
+//! server.
 
 const std = @import("std");
 const server_module = @import("server.zig");
@@ -28,7 +28,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         \\# Minecraft server benchmark
         \\
         \\{d} runs. `./run.sh` reproduces them all, `./run.sh <server>` one server, and
-        \\`./run.sh --scenarios=<scenario>` one scenario, as CI runs each on a machine of its own.
+        \\`scenarios/<scenario>.sh` one scenario, as CI runs each on a machine of its own.
         \\Every server gets the same view and simulation distance, {d} chunks, and bots on their own CPUs.
         \\Each scenario names the machine its runs measured on and charts how its measures grow with
         \\players, or cows in the cows scenario, followed by a table for every count.
@@ -66,12 +66,12 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         var counts: std.ArrayList(u64) = .empty;
         for (runs.items) |run| {
             if (!matches(run, terrain, kind)) continue;
-            const players: u64 = @intFromFloat(number(run, &.{axis(kind)}));
+            const players: u64 = @intFromFloat(number(run, &.{kind.counted()}));
             if (std.mem.indexOfScalar(u64, counts.items, players) == null) try counts.append(allocator, players);
         }
         if (counts.items.len == 0) continue;
         std.mem.sort(u64, counts.items, {}, std.sort.asc(u64));
-        try writer.print("## {s} terrain, {s}\n\n{s}\n\n", .{ terrainName(terrain), @tagName(kind), description(kind) });
+        try writer.print("## {s} terrain, {s}\n\n{s}\n\n", .{ terrainName(terrain), @tagName(kind), kind.description() });
         try machines(allocator, writer, runs.items, terrain, kind);
         if (counts.items.len > 1) try chartSection(allocator, io, writer, directory, urls, runs.items, terrain, kind, counts.items);
         for (counts.items) |players| try table(writer, runs.items, terrain, kind, players);
@@ -126,11 +126,11 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
     }
     const name = try std.fmt.allocPrint(allocator, "{s}-{s}.svg", .{ @tagName(terrain), @tagName(kind) });
     const title = try std.fmt.allocPrint(allocator, "{s} terrain, {s}", .{ terrainName(terrain), @tagName(kind) });
-    const image = try charts.svg(allocator, title, axis(kind), counts, panels.items);
+    const image = try charts.svg(allocator, title, kind.counted(), counts, panels.items);
     const folder = try std.fs.path.join(allocator, &.{ directory, "charts" });
     try std.Io.Dir.cwd().createDirPath(io, folder);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ folder, name }), .data = image });
-    try writer.print("![{s}: CPU time, tick time, traffic and memory by number of {s}, on log scales]({s})\n\n", .{ title, axis(kind), try chartLink(allocator, urls, name) });
+    try writer.print("![{s}: CPU time, tick time, traffic and memory by number of {s}, on log scales]({s})\n\n", .{ title, kind.counted(), try chartLink(allocator, urls, name) });
     try writer.writeAll("Log scales, so a server using a hundred times more than another reads as clearly as one using twice as much. A gap in a line is a player count without a result, and a server with no tick times of its own has no mspt line.\n\n");
 }
 
@@ -220,7 +220,7 @@ fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writ
 }
 
 fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, players: u64) !void {
-    try writer.print("### {d} {s}\n\n", .{ players, if (players == 1) axis(kind)[0 .. axis(kind).len - 1] else axis(kind) });
+    try writer.print("### {d} {s}\n\n", .{ players, if (players == 1) kind.counted()[0 .. kind.counted().len - 1] else kind.counted() });
     try writer.writeAll(
         \\| Server | Total KB | KB/s | KB/chunk | Chunks | CPU ms/tick | mspt mean | mspt p99 | TPS | Peak RAM MB | Disk MB | World MB | Problems |
         \\|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -271,7 +271,7 @@ fn latest(runs: []const Object, server: server_module.Kind, terrain: server_modu
     var found: ?Object = null;
     for (runs) |run| {
         if (!matches(run, terrain, kind) or !std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) continue;
-        if (number(run, &.{axis(kind)}) != @as(f64, @floatFromInt(players))) continue;
+        if (number(run, &.{kind.counted()}) != @as(f64, @floatFromInt(players))) continue;
         found = run;
     }
     return found;
@@ -317,20 +317,4 @@ fn terrainName(terrain: server_module.Terrain) []const u8 {
         .flat => "Flat",
         .generate => unreachable,
     };
-}
-
-fn description(kind: scenario.Kind) []const u8 {
-    return switch (kind) {
-        .idle => "Everyone stands still at spawn.",
-        .wander => "Everyone flies at walking speed at random within 24 blocks of spawn, in sight of each other.",
-        .spread => "Everyone flies to a spot of their own, far enough apart that views never overlap, and hovers there.",
-        .explore => "Everyone flies outward at 20 blocks a second into terrain never generated before.",
-        .build => "Everyone places or breaks a block every tick at a spot of their own near spawn.",
-        .cows => "One player stands at spawn among cows summoned two blocks apart on a square field around them, all in view and ticking.",
-    };
-}
-
-/// What a scenario counts: cows around one player in the cows scenario, players in every other.
-fn axis(kind: scenario.Kind) []const u8 {
-    return if (kind == .cows) "cows" else "players";
 }

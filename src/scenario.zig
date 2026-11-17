@@ -37,9 +37,25 @@ pub const Kind = enum {
     /// One player stands at spawn among cows the server summons on a square field around them.
     cows,
 
+    /// What a run's count counts.
+    pub fn counted(kind: Kind) []const u8 {
+        return if (kind == .cows) "cows" else "players";
+    }
+
     /// Whether bots must reach a place before measuring starts.
     pub fn travels(kind: Kind) bool {
         return kind == .spread or kind == .build;
+    }
+
+    pub fn description(kind: Kind) []const u8 {
+        return switch (kind) {
+            .idle => "Everyone stands still at spawn.",
+            .wander => "Everyone flies at walking speed at random within 24 blocks of spawn, in sight of each other.",
+            .spread => "Everyone flies to a spot of their own, far enough apart that views never overlap, and hovers there.",
+            .explore => "Everyone flies outward at 20 blocks a second into terrain never generated before.",
+            .build => "Everyone places or breaks a block every tick at a spot of their own near spawn.",
+            .cows => "One player stands at spawn among cows summoned two blocks apart on a square field around them, all in view and ticking.",
+        };
     }
 };
 
@@ -84,12 +100,6 @@ pub fn spreadTarget(bot: *const Bot) [3]f64 {
     const radius = @as(f64, spread_spacing) / @sqrt(std.math.pi) * @sqrt(index);
     const angle = index * golden_angle;
     return .{ bot.origin[0] + @cos(angle) * radius, cruise_altitude, bot.origin[2] + @sin(angle) * radius };
-}
-
-/// Blocks from spawn to the far edge of the farthest view in `spread`.
-pub fn spreadReach(count: usize) f64 {
-    const radius = @as(f64, spread_spacing) / @sqrt(std.math.pi) * @sqrt(@as(f64, @floatFromInt(count)));
-    return radius + (view_distance + 1) * 16;
 }
 
 fn spread(bot: *Bot, count: usize) !void {

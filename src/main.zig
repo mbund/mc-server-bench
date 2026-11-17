@@ -1,6 +1,6 @@
-//! Cross server benchmarks. `run` measures one server in one scenario with some number of bots,
-//! `sweep` measures every combination of servers, terrains, scenarios and bot counts, one at a
-//! time, and `report` writes the results of sweeps as one Markdown file.
+//! Cross server benchmarks. `run` measures one server in one scenario on one terrain with some
+//! number of bots, which the scripts in scenarios/ repeat for every server and count they compare,
+//! and `report` writes the results of the runs as one Markdown file.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -15,11 +15,12 @@ const Server = server_module.Server;
 const now = bot.now;
 
 pub const Settings = struct {
-    servers: []const server_module.Kind = &.{},
-    scenarios: []const scenario.Kind = &.{},
-    players: []const usize = &.{},
-    /// Cows the `cows` scenario summons around its one player, in place of player counts.
-    cows: []const usize = &.{},
+    server: ?server_module.Kind = null,
+    scenario: ?scenario.Kind = null,
+    terrain: server_module.Terrain = .flat,
+    players: usize = 1,
+    /// Cows the cows scenario summons around its player.
+    cows: usize = 0,
     warmup_s: u64 = 20,
     measure_s: u64 = 60,
     /// Half the machine's CPUs each when not given.
@@ -30,9 +31,6 @@ pub const Settings = struct {
     out: []const u8 = "runs/latest",
     keep_worlds: bool = false,
     dump_frames: ?[]const u8 = null,
-    terrains: []const server_module.Terrain = &.{.flat},
-    /// The terrain of the run being measured, one of `terrains`.
-    terrain: server_module.Terrain = .flat,
     /// Chunks out from the centre that `pregen` generates.
     radius: i32 = config.terrain_radius,
     /// Another dimension for `pregen` to generate into the existing world, like minecraft:the_nether.
@@ -50,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
         return report.write(allocator, init.io, args[2], urls);
     }
     var settings: Settings = .{};
-    for (args[2..]) |argument| try parseOption(allocator, &settings, argument);
+    for (args[2..]) |argument| try parseOption(&settings, argument);
     // The server takes the first half of the CPUs and the bots the second, unless told otherwise.
     const cpus = try std.Thread.getCpuCount();
     if (cpus < 2) return error.TooFewCpus;
@@ -59,12 +57,11 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, verb, "pregen")) {
         return pregen(allocator, init.io, try std.process.currentPathAlloc(init.io, allocator), settings);
     }
-    if (std.mem.eql(u8, verb, "run")) {
-        if (settings.servers.len != 1 or settings.scenarios.len != 1 or settings.players.len != 1) return usage();
-    } else if (!std.mem.eql(u8, verb, "sweep")) return usage();
-    if (settings.servers.len == 0 or settings.scenarios.len == 0) return usage();
-    // Player counts for every scenario but cows, and cow counts for cows.
-    for (settings.scenarios) |kind| if ((if (kind == .cows) settings.cows else settings.players).len == 0) return usage();
+    if (!std.mem.eql(u8, verb, "run")) return usage();
+    const server = settings.server orelse return usage();
+    const kind = settings.scenario orelse return usage();
+    // Cows come only with the cows scenario, which always has some.
+    if (settings.players == 0 or (kind == .cows) != (settings.cows > 0)) return usage();
     // Before pinning, while every CPU still counts.
     const host = try hostInfo(allocator, init.io);
     // Bots keep to their own CPUs, apart from the server's.
@@ -73,45 +70,24 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.Dir.cwd().createDirPath(init.io, settings.out);
     const results_path = try std.fs.path.join(allocator, &.{ settings.out, "results.jsonl" });
 
-    var failures: usize = 0;
-    // The cows scenario counts cows around one player where every other counts players.
-    for (settings.terrains) |terrain| for (settings.scenarios) |kind| for (if (kind == .cows) settings.cows else settings.players) |count| for (settings.servers) |server| {
-        const players: usize = if (kind == .cows) 1 else count;
-        const cows: usize = if (kind == .cows) count else 0;
-        // Bots on real terrain fly above it, and only the pregenerated area is the same everywhere.
-        // Cows graze on the flat world only.
-        if (terrain == .real and (kind == .build or kind == .explore or kind == .cows)) continue;
-        if (terrain == .real and kind == .spread and scenario.spreadReach(players) > config.terrain_radius * 16) {
-            std.log.info("skipping {s} spread on real terrain with {d} players, whose views reach past the pregenerated area", .{ @tagName(server), players });
-            continue;
-        }
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        var run_settings = settings;
-        run_settings.terrain = terrain;
-        std.log.info("{s} {s} on {s} terrain with {d} players and {d} cows", .{ @tagName(server), @tagName(kind), @tagName(terrain), players, cows });
-        var result = measure(arena.allocator(), init.io, root, run_settings, server, kind, players, cows) catch |err| {
-            std.log.err("{s} {s} {d}: {s}", .{ @tagName(server), @tagName(kind), count, @errorName(err) });
-            failures += 1;
-            continue;
-        };
-        result.version = try server_module.version(server, arena.allocator(), init.io, root);
-        result.host = host;
-        if (result.problems.len != 0) failures += 1;
-        try append(arena.allocator(), init.io, results_path, result);
-        std.log.info("  {d:.2} cpu ms/tick, {d:.1} tps, {d:.2} mspt, {d:.0} MB peak, {d:.1} KB/s per player, {d:.1} MB written, world {d:.1} MB, {d} problems", .{
-            result.window.cpu_ms_per_tick, result.window.tps, result.window.mspt.mean_ms, result.peak_rss_mb,
-            result.window.received_kb_per_s_per_player, result.window.disk_write_mb, result.world_mb, result.problems.len,
-        });
-    };
-    if (failures != 0) std.log.warn("{d} runs had problems, see {s}", .{ failures, results_path });
+    const count = if (kind == .cows) settings.cows else settings.players;
+    std.log.info("{s} {s} on {s} terrain with {d} {s}", .{ @tagName(server), @tagName(kind), @tagName(settings.terrain), count, kind.counted() });
+    var result = try measure(allocator, init.io, root, settings, server, kind, settings.players, settings.cows);
+    result.version = try server_module.version(server, allocator, init.io, root);
+    result.host = host;
+    try append(allocator, init.io, results_path, result);
+    std.log.info("  {d:.2} cpu ms/tick, {d:.1} tps, {d:.2} mspt, {d:.0} MB peak, {d:.1} KB/s per player, {d:.1} MB written, world {d:.1} MB, {d} problems", .{
+        result.window.cpu_ms_per_tick, result.window.tps, result.window.mspt.mean_ms, result.peak_rss_mb,
+        result.window.received_kb_per_s_per_player, result.window.disk_write_mb, result.world_mb, result.problems.len,
+    });
+    if (result.problems.len != 0) std.log.warn("the run had problems, see {s}", .{results_path});
 }
 
 fn usage() error{InvalidArguments} {
     std.log.err(
         \\usage:
-        \\  bench run --server=<name> --scenario=<name> --players=<count> [options]
-        \\  bench sweep --servers=a,b --scenarios=a,b --players=1,2,5 [options]
+        \\  bench run --server=<name> --scenario=<name> [--terrain=flat|real] [--players=<count>] [--cows=<count>] [options]
+        \\                                    measure one server in one scenario, adding its result to <out>/results.jsonl
         \\  bench report <directory> [--chart-urls=<file of "name url" lines>]
         \\  bench pregen [--server=vanilla|steel] [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate the real terrain world with vanilla, or add a dimension to it
@@ -119,30 +95,23 @@ fn usage() error{InvalidArguments} {
         \\scenarios: idle wander spread explore build cows
         \\options: --warmup=<s> --seconds=<s> --server-cpus=<list> --bot-cpus=<list>
         \\         --bot-threads=<n> --join-interval=<ms> --out=<directory> --keep-worlds
-        \\         --dump-frames=<path prefix> --terrains=flat,real (real skips explore, build and cows)
-        \\         --cows=16,256 (cows around one player in the cows scenario, in place of --players)
+        \\         --dump-frames=<path prefix>
     , .{});
     return error.InvalidArguments;
 }
 
-fn parseOption(allocator: std.mem.Allocator, settings: *Settings, argument: []const u8) !void {
+fn parseOption(settings: *Settings, argument: []const u8) !void {
     const equals = std.mem.indexOfScalar(u8, argument, '=');
     const name = argument[0 .. equals orelse argument.len];
     const value = if (equals) |at| argument[at + 1 ..] else "";
-    if (std.mem.eql(u8, name, "--server") or std.mem.eql(u8, name, "--servers")) {
-        settings.servers = try parseList(server_module.Kind, allocator, value);
-    } else if (std.mem.eql(u8, name, "--scenario") or std.mem.eql(u8, name, "--scenarios")) {
-        settings.scenarios = try parseList(scenario.Kind, allocator, value);
+    if (std.mem.eql(u8, name, "--server")) {
+        settings.server = try parseName(server_module.Kind, value);
+    } else if (std.mem.eql(u8, name, "--scenario")) {
+        settings.scenario = try parseName(scenario.Kind, value);
     } else if (std.mem.eql(u8, name, "--players")) {
-        var list: std.ArrayList(usize) = .empty;
-        var items = std.mem.tokenizeScalar(u8, value, ',');
-        while (items.next()) |item| try list.append(allocator, try std.fmt.parseInt(usize, item, 10));
-        settings.players = list.items;
+        settings.players = try std.fmt.parseInt(usize, value, 10);
     } else if (std.mem.eql(u8, name, "--cows")) {
-        var list: std.ArrayList(usize) = .empty;
-        var items = std.mem.tokenizeScalar(u8, value, ',');
-        while (items.next()) |item| try list.append(allocator, try std.fmt.parseInt(usize, item, 10));
-        settings.cows = list.items;
+        settings.cows = try std.fmt.parseInt(usize, value, 10);
     } else if (std.mem.eql(u8, name, "--warmup")) {
         settings.warmup_s = try std.fmt.parseInt(u64, value, 10);
     } else if (std.mem.eql(u8, name, "--seconds")) {
@@ -157,9 +126,9 @@ fn parseOption(allocator: std.mem.Allocator, settings: *Settings, argument: []co
         settings.join_interval_ms = try std.fmt.parseInt(u64, value, 10);
     } else if (std.mem.eql(u8, name, "--out")) {
         settings.out = value;
-    } else if (std.mem.eql(u8, name, "--terrain") or std.mem.eql(u8, name, "--terrains")) {
-        settings.terrains = try parseList(server_module.Terrain, allocator, value);
-        for (settings.terrains) |terrain| if (terrain == .generate) return error.InvalidArguments;
+    } else if (std.mem.eql(u8, name, "--terrain")) {
+        settings.terrain = try parseName(server_module.Terrain, value);
+        if (settings.terrain == .generate) return error.InvalidArguments;
     } else if (std.mem.eql(u8, name, "--radius")) {
         settings.radius = try std.fmt.parseInt(i32, value, 10);
     } else if (std.mem.eql(u8, name, "--dimension")) {
@@ -174,14 +143,11 @@ fn parseOption(allocator: std.mem.Allocator, settings: *Settings, argument: []co
     }
 }
 
-fn parseList(comptime T: type, allocator: std.mem.Allocator, value: []const u8) ![]const T {
-    var list: std.ArrayList(T) = .empty;
-    var items = std.mem.tokenizeScalar(u8, value, ',');
-    while (items.next()) |item| try list.append(allocator, std.meta.stringToEnum(T, item) orelse {
-        std.log.err("unknown name {s}", .{item});
+fn parseName(comptime T: type, value: []const u8) !T {
+    return std.meta.stringToEnum(T, value) orelse {
+        std.log.err("unknown name {s}", .{value});
         return error.InvalidArguments;
-    });
-    return list.items;
+    };
 }
 
 pub const Sample = struct {
@@ -809,7 +775,7 @@ fn traffic(allocator: std.mem.Allocator, swarm: *bot.Swarm) !TrafficSummary {
 /// tiles at a time until generation quiets. Vanilla generates the world every server reading
 /// vanilla worlds starts from, and SteelMC, which reads none, the same chunks in its own.
 fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings) !void {
-    const kind: server_module.Kind = if (settings.servers.len == 1) settings.servers[0] else .vanilla;
+    const kind = settings.server orelse .vanilla;
     if (kind != .vanilla and kind != .steel) return error.InvalidArguments;
     if (kind == .steel and settings.dimension != null) return error.InvalidArguments;
     const directory = try std.fmt.allocPrint(allocator, "servers/build/terrain/{s}", .{@tagName(kind)});
