@@ -254,12 +254,16 @@ fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Te
     }
     try writer.writeByte('\n');
     if (problems == 0) return;
+    // Each server's problems folded away under their count, as a run with many bots can list
+    // one for each.
     for (std.enums.values(server_module.Kind)) |server| {
         const run = latest(runs, server, terrain, kind, players) orelse continue;
         const list = run.get("problems") orelse continue;
-        for (list.array.items) |problem| try writer.print("- {s}: {s}\n", .{ @tagName(server), problem.string });
+        if (list.array.items.len == 0) continue;
+        try writer.print("<details><summary>{s}: {d} {s}</summary>\n\n", .{ @tagName(server), list.array.items.len, if (list.array.items.len == 1) "problem" else "problems" });
+        for (list.array.items) |problem| try writer.print("- {s}\n", .{problem.string});
+        try writer.writeAll("\n</details>\n\n");
     }
-    try writer.writeByte('\n');
 }
 
 fn matches(run: Object, terrain: server_module.Terrain, kind: scenario.Kind) bool {
