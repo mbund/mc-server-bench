@@ -2,8 +2,8 @@
 # own, then every scenario runs on a machine of its own with every server on it, one after
 # another, so the servers within a scenario compare on the same machine. The last job joins their
 # results into one Markdown report, shown on the run's summary page and kept as an artifact.
-# Toolchains come from their own setup actions at the versions the flake pins, which is much
-# faster than installing Nix on every runner.
+# Toolchains are installed directly at the versions the flake pins, which is much faster than
+# installing Nix on every runner.
 name: Benchmark
 
 on:
@@ -14,41 +14,45 @@ on:
 env:
   # The scripts run here without entering the flake's shell.
   MC_SERVER_BENCH_SHELL: 1
+  # Lightning Rod's build needs its Zig cache outside the repository.
+  ZIG_LOCAL_CACHE_DIR: /tmp/mc-server-bench-zig
 
 jobs:
   terrain:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.0
-          use-cache: false
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      # Zig 0.17.0, which the flake pins, checked against the hash ziglang.org publishes.
+      - run: |
+          curl -fsSL -o "$RUNNER_TEMP/zig.tar.xz" https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
+          echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  $RUNNER_TEMP/zig.tar.xz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 25
       # The worlds depend only on the vanilla release, the seed and the generator settings.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: |
             servers/build/terrain/vanilla
             servers/build/flat
           key: terrain-${{ hashFiles('setup.sh', 'src/main.zig', 'src/server.zig', 'src/config.zig') }}
-      - run: |
-          # Lightning Rod's build needs its Zig caches outside the repository, and setup-zig
-          # puts them inside it.
-          export ZIG_LOCAL_CACHE_DIR=/tmp/mc-server-bench-zig ZIG_GLOBAL_CACHE_DIR=/tmp/mc-server-bench-zig-global
-          ./setup.sh bench terrain
+      - run: ./setup.sh bench terrain
+      # Vanilla's own account of a failed world generation, which stays on the runner otherwise.
+      - if: failure()
+        run: tail -n 200 servers/build/terrain/vanilla/server.log || true
       - run: |
           tar -czf harness.tar.gz zig-out/bin/bench
           tar -czf terrain.tar.gz servers/build/terrain/vanilla servers/build/flat
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: harness
           path: harness.tar.gz
           retention-days: 1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: terrain
           path: terrain.tar.gz
@@ -56,7 +60,7 @@ jobs:
 
   build:
     needs: terrain
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -83,42 +87,42 @@ jobs:
             inputs: setup.sh patches/occlusion-26.2.patch
             outputs: servers/vanilla servers/paper servers/fabric
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: key
         run: |
           commits=$(for name in ${{ matrix.submodules }}; do git rev-parse "HEAD:servers/$name"; done)
           echo "key=build-${{ matrix.name }}-$( (echo "$commits"; cat ${{ matrix.inputs }}) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
       - id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: build-${{ matrix.name }}.tar.gz
           key: ${{ steps.key.outputs.key }}
+      # Zig 0.17.0, which the flake pins, checked against the hash ziglang.org publishes.
       - if: steps.cache.outputs.cache-hit != 'true' && matrix.name == 'lightning-rod'
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.17.0
-          use-cache: false
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/zig.tar.xz" https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
+          echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  $RUNNER_TEMP/zig.tar.xz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
       - if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 25
       # SteelMC links with lld.
       - if: steps.cache.outputs.cache-hit != 'true' && matrix.name == 'steel'
-        run: sudo apt-get install -y lld
+        run: sudo apt-get update && sudo apt-get install -y lld
       - if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: terrain
       - if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          # Lightning Rod's build needs its Zig caches outside the repository, and setup-zig
-          # puts them inside it.
-          export ZIG_LOCAL_CACHE_DIR=/tmp/mc-server-bench-zig ZIG_GLOBAL_CACHE_DIR=/tmp/mc-server-bench-zig-global
           tar -xzf terrain.tar.gz
           ./setup.sh ${{ matrix.targets }}
           tar -czf build-${{ matrix.name }}.tar.gz ${{ matrix.outputs }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: build-${{ matrix.name }}
           path: build-${{ matrix.name }}.tar.gz
@@ -126,19 +130,19 @@ jobs:
 
   bench:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         scenario: [idle, wander, spread, explore, build]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 25
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: "{harness,terrain,build-*}"
           merge-multiple: true
@@ -148,7 +152,7 @@ jobs:
       - if: failure()
         run: test ! -f runs/standard/results.jsonl || ./zig-out/bin/bench report runs/standard
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: results-${{ matrix.scenario }}
           path: runs/standard/results.jsonl
@@ -171,15 +175,15 @@ jobs:
   report:
     needs: bench
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # To find the charts the scenario jobs uploaded.
     permissions:
       actions: read
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: harness
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: results-*
           path: results
@@ -194,7 +198,7 @@ jobs:
             --jq '.artifacts[] | select(.name | endswith(".svg")) | "\(.name) ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/\(.id)"' > chart-urls.txt
           ./zig-out/bin/bench report runs/standard --chart-urls=chart-urls.txt
           cat runs/standard/report.md >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: report
           path: |
