@@ -24,25 +24,25 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8) !v
     try writer.print(
         \\# Minecraft server benchmark
         \\
-        \\{d} runs. `./run.sh` in `nix develop` reproduces them all, and `./run.sh <server>` one server.
+        \\{d} runs. `./run.sh` reproduces them all, `./run.sh <server>` one server, and
+        \\`./run.sh --scenarios=<scenario>` one scenario, as CI runs each on a machine of its own.
         \\Every server gets the same view and simulation distance, {d} chunks, and bots on their own CPUs.
+        \\Each scenario names the machine its runs measured on, followed by a table for every player
+        \\count.
         \\
         \\## Servers
         \\
-        \\| Server | Version | CPU | CPUs | Memory | Kernel |
-        \\|---|---|---|---:|---:|---|
+        \\| Server | Version |
+        \\|---|---|
         \\
     , .{ runs.items.len, scenario.view_distance });
     for (std.enums.values(server_module.Kind)) |kind| {
         const run = for (runs.items) |candidate| {
             if (std.mem.eql(u8, text(candidate, &.{"server"}), @tagName(kind))) break candidate;
         } else continue;
-        // Results from before versions and machines were recorded have neither.
-        if (text(run, &.{"version"}).len == 0) {
-            try writer.print("| {s} | not recorded | | | | |\n", .{@tagName(kind)});
-            continue;
-        }
-        try writer.print("| {s} | {s} | {s} | {d:.0} | {d:.0} GB | {s} |\n", .{ @tagName(kind), text(run, &.{"version"}), text(run, &.{ "host", "cpu" }), number(run, &.{ "host", "cpus" }), number(run, &.{ "host", "memory_mb" }) / 1024, text(run, &.{ "host", "kernel" }) });
+        // Results from before versions were recorded have none.
+        const recorded = text(run, &.{"version"});
+        try writer.print("| {s} | {s} |\n", .{ @tagName(kind), if (recorded.len == 0) "not recorded" else recorded });
     }
     try writer.writeAll(
         \\
@@ -65,7 +65,10 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8) !v
             const players: u64 = @intFromFloat(number(run, &.{"players"}));
             if (std.mem.indexOfScalar(u64, counts.items, players) == null) try counts.append(allocator, players);
         }
+        if (counts.items.len == 0) continue;
         std.mem.sort(u64, counts.items, {}, std.sort.asc(u64));
+        try writer.print("## {s} terrain, {s}\n\n{s}\n\n", .{ terrainName(terrain), @tagName(kind), description(kind) });
+        try machines(allocator, writer, runs.items, terrain, kind);
         for (counts.items) |players| try table(writer, runs.items, terrain, kind, players);
     };
     const path = try std.fs.path.join(allocator, &.{ directory, "report.md" });
@@ -73,8 +76,27 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8) !v
     std.log.info("wrote {s}", .{path});
 }
 
+/// Every machine a scenario measured on: one in CI, where a scenario runs in a job of its own,
+/// and more only when results were joined from elsewhere.
+fn machines(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind) !void {
+    var seen: std.ArrayList(Object) = .empty;
+    for (runs) |run| {
+        if (!matches(run, terrain, kind) or text(run, &.{ "host", "cpu" }).len == 0) continue;
+        for (seen.items) |other| {
+            if (std.mem.eql(u8, text(other, &.{ "host", "cpu" }), text(run, &.{ "host", "cpu" })) and number(other, &.{ "host", "cpus" }) == number(run, &.{ "host", "cpus" }) and
+                std.mem.eql(u8, text(other, &.{ "host", "kernel" }), text(run, &.{ "host", "kernel" }))) break;
+        } else try seen.append(allocator, run);
+    }
+    if (seen.items.len == 0) return;
+    try writer.writeAll(if (seen.items.len == 1) "**Machine:**" else "**Machines** (these runs were joined from more than one, so they compare less exactly):");
+    for (seen.items, 0..) |run, index| {
+        try writer.print("{s} {s}, {d:.0} CPUs, {d:.1} GB memory, Linux {s}", .{ if (index == 0) "" else ";", text(run, &.{ "host", "cpu" }), number(run, &.{ "host", "cpus" }), number(run, &.{ "host", "memory_mb" }) / 1024, text(run, &.{ "host", "kernel" }) });
+    }
+    try writer.writeAll("\n\n");
+}
+
 fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, players: u64) !void {
-    try writer.print("## {s} terrain, {s}, {d} {s}\n\n{s}\n\n", .{ terrainName(terrain), @tagName(kind), players, if (players == 1) "player" else "players", description(kind) });
+    try writer.print("### {d} {s}\n\n", .{ players, if (players == 1) "player" else "players" });
     try writer.writeAll(
         \\| Server | Total KB | KB/s | KB/chunk | Chunks | CPU ms/tick | mspt mean | mspt p99 | TPS | Peak RAM MB | Disk MB | World MB | Problems |
         \\|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|

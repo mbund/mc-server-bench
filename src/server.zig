@@ -52,20 +52,19 @@ pub const Kind = enum {
 };
 
 /// The release or commit of a server, so a report names what it compared. Releases are the ones
-/// setup.sh pins, and servers built from source report their submodule's commit.
+/// setup.sh pins, and servers built from source report the commit setup.sh built, which it
+/// records beside the build, as CI runs them where the source is not checked out.
 pub fn version(kind: Kind, allocator: std.mem.Allocator, io: std.Io, root: []const u8) ![]const u8 {
-    const directory = switch (kind) {
+    switch (kind) {
         .vanilla => return "26.2",
         .paper, .@"paper-antixray-1" => return "26.2 build 135",
         .fabric => return "26.2, Fabric Loader 0.20.1, FerriteCore 9.0.0, Lithium 0.25.3, ScalableLux 0.3.0-alpha.0.3, Krypton 0.3.1",
         .@"fabric-occlusion" => return "26.2, Fabric Loader 0.20.1, FerriteCore 9.0.0, Lithium 0.25.3, ScalableLux 0.3.0-alpha.0.3, Krypton 0.3.1, Fabric API 0.161.0, Occlusion 1.0.0 ported to 26.2",
-        .@"lightning-rod" => "servers/lightning-rod",
-        .pumpkin => "servers/pumpkin",
-        .steel => "servers/steel",
-    };
-    const result = try std.process.run(allocator, io, .{ .argv = &.{ "git", "-C", try std.fs.path.join(allocator, &.{ root, directory }), "rev-parse", "--short=12", "HEAD" } });
-    if (result.term != .exited or result.term.exited != 0) return error.UnknownCommit;
-    return std.mem.trim(u8, result.stdout, " \n");
+        .@"lightning-rod", .pumpkin, .steel => {},
+    }
+    const path = try std.fmt.allocPrint(allocator, "{s}/servers/build/versions/{s}", .{ root, @tagName(kind) });
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(256)) catch return "not recorded";
+    return std.mem.trim(u8, text, " \n");
 }
 
 /// Flat layers every server builds its world from: stone up to y 63 and grass on top, the world
