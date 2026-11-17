@@ -4,8 +4,10 @@
 const std = @import("std");
 
 pub const port: u16 = 25700;
-/// The view distance bots ask for and servers are configured with, and the simulation distance.
-pub const view_distance = 10;
+/// The render distance bots ask for and servers are configured with.
+pub const view_distance = 16;
+/// The distance around players that servers tick, vanilla's default.
+pub const simulation_distance = 10;
 /// Room for exactly the bots of a run, the same every server gets. Lightning Rod sets aside
 /// everything for every player it has room for, so room for more would cost it what it costs the
 /// others only once used.

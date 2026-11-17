@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
             // Visibility culling and one column past the view, the ring vanilla sends so every
             // column in view has its neighbours.
             lightning_rod.plugin.configured(Streaming, .{ .prefetch = 1, .hull = true }),
-            lightning_rod.plugin.configured(Players, Players.Configuration{ .maximum = max_players, .render_distance = config.view_distance, .simulation_distance = config.view_distance }),
+            lightning_rod.plugin.configured(Players, Players.Configuration{ .maximum = max_players, .render_distance = config.view_distance, .simulation_distance = config.simulation_distance }),
             lightning_rod.plugin.configured(Chunks, Chunks.Configuration.forPlayers(max_players)),
             lightning_rod.plugin.configured(vanilla.Mobs, vanilla.Mobs.Configuration{ .maximum = @max(1024, cows) }),
         }),

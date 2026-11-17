@@ -340,7 +340,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\max-players={d}
                 \\allow-flight=true
                 \\
-            , .{ config.port, world, scenario.view_distance, scenario.view_distance, config.maxPlayers(options.players) }) });
+            , .{ config.port, world, scenario.view_distance, config.simulation_distance, config.maxPlayers(options.players) }) });
             if (options.terrain == .real) try copy(allocator, io, try path(allocator, options.root, "servers/build/terrain/vanilla/world"), try path(allocator, options.directory, "world"));
         },
         .@"lightning-rod" => {
@@ -369,7 +369,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\[networking.bedrock]
                 \\enabled = false
                 \\
-            , .{ terrain_seed, config.port, config.maxPlayers(options.players), scenario.view_distance, scenario.view_distance }) });
+            , .{ terrain_seed, config.port, config.maxPlayers(options.players), scenario.view_distance, config.simulation_distance }) });
             if (flat) {
                 // Pumpkin takes its flat layers from vanilla's world generation settings.
                 const data = try path(allocator, options.directory, "world/data/minecraft");
@@ -385,7 +385,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             text = try setting(allocator, text, "server_port", try std.fmt.allocPrint(allocator, "{d}", .{config.port}));
             text = try setting(allocator, text, "max_players", try std.fmt.allocPrint(allocator, "{d}", .{config.maxPlayers(options.players)}));
             text = try setting(allocator, text, "view_distance", try std.fmt.allocPrint(allocator, "{d}", .{scenario.view_distance}));
-            text = try setting(allocator, text, "simulation_distance", try std.fmt.allocPrint(allocator, "{d}", .{scenario.view_distance}));
+            text = try setting(allocator, text, "simulation_distance", try std.fmt.allocPrint(allocator, "{d}", .{config.simulation_distance}));
             text = try setting(allocator, text, "online_mode", "false");
             text = try setting(allocator, text, "encryption", "false");
             text = try setting(allocator, text, "allow_flight", "true");

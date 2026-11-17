@@ -6,6 +6,7 @@ const std = @import("std");
 const server_module = @import("server.zig");
 const scenario = @import("scenario.zig");
 const charts = @import("charts.zig");
+const config = @import("config.zig");
 
 const Object = std.json.ObjectMap;
 
@@ -28,7 +29,8 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         \\
         \\{d} runs. `./run.sh` reproduces them all, `./run.sh <server>` one server, and
         \\`scenarios/<scenario>.sh` one scenario, as CI runs each on a machine of its own.
-        \\Every server gets the same view and simulation distance, {d} chunks, and bots on their own CPUs.
+        \\Every server gets the same render distance, {d} chunks, and simulation distance, {d} chunks, and
+        \\bots on their own CPUs.
         \\Each scenario names the machine its runs measured on and charts how its measures grow with
         \\players, or cows in the cows scenario, followed by a table for every count.
         \\
@@ -37,7 +39,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         \\| Server | Version |
         \\|---|---|
         \\
-    , .{ runs.items.len, scenario.view_distance });
+    , .{ runs.items.len, scenario.view_distance, config.simulation_distance });
     for (std.enums.values(server_module.Kind)) |kind| {
         const run = for (runs.items) |candidate| {
             if (std.mem.eql(u8, text(candidate, &.{"server"}), @tagName(kind))) break candidate;
