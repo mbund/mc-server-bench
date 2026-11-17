@@ -27,8 +27,8 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8) !v
         \\{d} runs. `./run.sh` reproduces them all, `./run.sh <server>` one server, and
         \\`./run.sh --scenarios=<scenario>` one scenario, as CI runs each on a machine of its own.
         \\Every server gets the same view and simulation distance, {d} chunks, and bots on their own CPUs.
-        \\Each scenario names the machine its runs measured on, followed by a table for every player
-        \\count.
+        \\Each scenario names the machine its runs measured on and charts how its measures grow with
+        \\players, followed by a table for every player count.
         \\
         \\## Servers
         \\
@@ -69,6 +69,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8) !v
         std.mem.sort(u64, counts.items, {}, std.sort.asc(u64));
         try writer.print("## {s} terrain, {s}\n\n{s}\n\n", .{ terrainName(terrain), @tagName(kind), description(kind) });
         try machines(allocator, writer, runs.items, terrain, kind);
+        if (counts.items.len > 1) for (charts) |chart| try barChart(allocator, writer, runs.items, terrain, kind, counts.items, chart);
         for (counts.items) |players| try table(writer, runs.items, terrain, kind, players);
     };
     const path = try std.fs.path.join(allocator, &.{ directory, "report.md" });
@@ -93,6 +94,62 @@ fn machines(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const 
         try writer.print("{s} {s}, {d:.0} CPUs, {d:.1} GB memory, Linux {s}", .{ if (index == 0) "" else ";", text(run, &.{ "host", "cpu" }), number(run, &.{ "host", "cpus" }), number(run, &.{ "host", "memory_mb" }) / 1024, text(run, &.{ "host", "kernel" }) });
     }
     try writer.writeAll("\n\n");
+}
+
+const Chart = struct {
+    title: []const u8,
+    unit: []const u8,
+    path: []const []const u8,
+    /// Whether the value counts only where the server reports its own tick times.
+    reported: bool = false,
+};
+
+const charts = [_]Chart{
+    .{ .title = "CPU ms per tick", .unit = "ms", .path = &.{ "window", "cpu_ms_per_tick" } },
+    .{ .title = "Mean mspt", .unit = "ms", .path = &.{ "window", "mspt", "mean_ms" }, .reported = true },
+    .{ .title = "KB/s received per player", .unit = "KB/s", .path = &.{ "window", "received_kb_per_s_per_player" } },
+    .{ .title = "Peak RAM", .unit = "MB", .path = &.{"peak_rss_mb"} },
+};
+
+/// A Mermaid bar chart of one measure, which GitHub draws in Markdown: a bar for every server at
+/// every player count, grouped by server, so each group shows how the server grows with players.
+/// Each bar's label names its server, count and value, so no bar is told by color alone and a
+/// value too small to see beside a large one is still read. Measures of different units never
+/// share a chart. A server not reporting the measure has no bars, and the chart says so.
+fn barChart(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, counts: []const u64, chart: Chart) !void {
+    var labels: std.ArrayList(u8) = .empty;
+    var values: std.ArrayList(u8) = .empty;
+    var silent: std.ArrayList(u8) = .empty;
+    var bars: usize = 0;
+    for (std.enums.values(server_module.Kind)) |server| {
+        var present = false;
+        var reported = false;
+        for (counts) |players| {
+            const run = latest(runs, server, terrain, kind, players) orelse continue;
+            present = true;
+            if (chart.reported and std.mem.eql(u8, text(run, &.{ "window", "mspt", "source" }), "none")) continue;
+            reported = true;
+            const value = number(run, chart.path);
+            try labels.print(allocator, "{s}\"{s} {d} ({d:.1})\"", .{ if (bars == 0) "" else ", ", @tagName(server), players, value });
+            try values.print(allocator, "{s}{d:.2}", .{ if (bars == 0) "" else ", ", value });
+            bars += 1;
+        }
+        if (present and !reported) try silent.print(allocator, "{s}{s}", .{ if (silent.items.len == 0) "" else ", ", @tagName(server) });
+    }
+    if (bars == 0) return;
+    try writer.print(
+        \\```mermaid
+        \\%%{{init: {{"xyChart": {{"width": 720, "height": {d}}}, "themeVariables": {{"xyChart": {{"plotColorPalette": "#3987e5"}}}}}}}}%%
+        \\xychart-beta horizontal
+        \\    title "{s}"
+        \\    x-axis [{s}]
+        \\    y-axis "{s}"
+        \\    bar [{s}]
+        \\```
+        \\
+        \\
+    , .{ 80 + 22 * bars, chart.title, labels.items, chart.unit, values.items });
+    if (silent.items.len != 0) try writer.print("No bars for {s}, which report no tick times of their own.\n\n", .{silent.items});
 }
 
 fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, players: u64) !void {
