@@ -346,6 +346,10 @@ const Run = struct {
         return self.swarm.reached(.spawned_ns) + self.swarm.count(.failed) == self.swarm.bots.len;
     }
 
+    fn viewed(self: *Run) bool {
+        return self.swarm.reached(.viewed_ns) + self.swarm.count(.failed) == self.swarm.bots.len;
+    }
+
     fn sawCows(self: *Run) bool {
         return self.swarm.total(.cows_seen) >= self.cows;
     }
@@ -409,6 +413,9 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         // The cows around the player once it is in, before warming up, and every one of them
         // sent to it.
         run.phase = "cows";
+        // Servers load the field around the player while it joins, and refuse a cow in a chunk
+        // not yet loaded, so the cows come once the player holds a full view.
+        if (!try run.wait(120, Run.viewed)) try problems.append(allocator, "the player had no full view to summon cows in");
         try server.summonCows(cows, swarm.bots[0].origin);
         if (!try run.wait(120, Run.sawCows)) try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ swarm.total(.cows_seen), cows }));
     }
