@@ -5,9 +5,10 @@ const std = @import("std");
 
 pub const port: u16 = 25700;
 /// The render distance bots ask for and servers are configured with.
-pub const view_distance = 16;
-/// The distance around players that servers tick, vanilla's default.
-pub const simulation_distance = 10;
+pub const view_distance = 8;
+/// The distance around players that servers tick, the render distance, as no server ticks chunks
+/// it has not loaded.
+pub const simulation_distance = view_distance;
 /// Room for exactly the bots of a run, the same every server gets. Lightning Rod sets aside
 /// everything for every player it has room for, so room for more would cost it what it costs the
 /// others only once used.
@@ -24,7 +25,7 @@ pub const metrics = "metrics";
 pub const cows_file = "cows";
 
 /// Blocks between neighbouring cows in `cows`, so 8192 cover a field about 180 blocks across,
-/// inside the render and simulation distance of the player in its middle.
+/// inside the render and simulation distance of the player in its middle, 8 chunks either way.
 pub const cow_spacing = 2;
 
 /// Where cow `index` stands: on a square spiral out from the spot of the player, leaving that spot

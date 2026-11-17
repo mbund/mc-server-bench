@@ -81,14 +81,15 @@ pub const Terrain = enum {
     flat,
     /// Vanilla's terrain from the bench's seed.
     real,
-    /// Stone and grass far enough out for the views of 256 players spread apart.
+    /// Stone and grass far enough out for the views of 256 players spread apart, which reach about
+    /// 2750 blocks out.
     wide,
 
     /// Chunks out from the origin that the world covers.
     pub fn radius(terrain: Terrain) i32 {
         return switch (terrain) {
             .flat, .real => 64,
-            .wide => 336,
+            .wide => 176,
         };
     }
 

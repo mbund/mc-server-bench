@@ -60,7 +60,7 @@ pub const Kind = enum {
 };
 
 /// The chunks a player renders around one spot: those vanilla's ChunkTrackingView.isWithinDistance
-/// counts within the render distance, each axis a chunk short, 921 at a distance of 16. Vanilla
+/// counts within the render distance, each axis a chunk short, 257 at a distance of 8. Vanilla
 /// sends a ring more, so the client can draw the edge, which this leaves out.
 pub fn viewChunks() u64 {
     return view_chunks;
@@ -83,7 +83,7 @@ const view_chunks: u64 = count: {
 };
 
 test "a full view is the chunks vanilla tracks" {
-    if (view_distance == 16) try std.testing.expectEqual(@as(u64, 921), viewChunks());
+    if (view_distance == 8) try std.testing.expectEqual(@as(u64, 257), viewChunks());
 }
 
 pub fn step(kind: Kind, bot: *Bot, count: usize) !void {
