@@ -251,7 +251,9 @@ pub const DotPanel = struct {
 pub const terrains = [_][]const u8{ "flat", "real" };
 const terrain_colors = [_][]const u8{ "#3987e5", "#d95926" };
 
-const row_height = 22;
+/// Each server's row, with a lane for each terrain so a mark never hides the other.
+const row_height = 28;
+const lane_offset = 5;
 const name_width = 136;
 
 /// A row per server and a dot per terrain on a log scale, for a measure of the server itself
@@ -313,7 +315,8 @@ fn dotPanel(writer: *std.Io.Writer, x: f64, y: f64, panel: DotPanel) !void {
         try writer.print("<line class=\"grid\" x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke-width=\"1\" stroke-dasharray=\"2 3\"/>", .{ left, middle, right, middle });
         for (row.values, terrain_colors, 0..) |value, color, terrain| if (value) |v| {
             try writer.print("<g><title>{s}, {s} terrain: {d:.2} {s}</title>", .{ @tagName(row.server), terrains[terrain], v, panel.unit });
-            try marker(writer, terrain, scale(v, low, high, left, right), middle, color);
+            const lane = middle + (@as(f64, @floatFromInt(terrain)) - 0.5) * 2 * lane_offset;
+            try marker(writer, terrain, scale(v, low, high, left, right), lane, color);
             try writer.writeAll("</g>");
         };
         try writer.writeByte('\n');
