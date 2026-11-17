@@ -202,6 +202,13 @@ jobs:
           path: runs/standard/charts/flat-${{ matrix.scenario }}.svg
           archive: false
           if-no-files-found: ignore
+      # Startup and world size come from the idle runs alone, so the idle job draws them.
+      - if: always() && matrix.scenario == 'idle'
+        uses: actions/upload-artifact@v7
+        with:
+          path: runs/standard/charts/startup-world.svg
+          archive: false
+          if-no-files-found: ignore
 
   report:
     needs: bench

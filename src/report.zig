@@ -61,6 +61,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         \\
     );
 
+    try startupSection(allocator, io, writer, directory, urls, runs.items);
     for ([_]server_module.Terrain{ .real, .flat }) |terrain| for (std.enums.values(scenario.Kind)) |kind| {
         var counts: std.ArrayList(u64) = .empty;
         for (runs.items) |run| {
@@ -129,15 +130,93 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
     const folder = try std.fs.path.join(allocator, &.{ directory, "charts" });
     try std.Io.Dir.cwd().createDirPath(io, folder);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ folder, name }), .data = image });
-    var link = try std.fmt.allocPrint(allocator, "charts/{s}", .{name});
+    try writer.print("![{s}: CPU time, tick time, traffic and memory by number of {s}, on log scales]({s})\n\n", .{ title, axis(kind), try chartLink(allocator, urls, name) });
+    try writer.writeAll("Log scales, so a server using a hundred times more than another reads as clearly as one using twice as much. A gap in a line is a player count without a result, and a server with no tick times of its own has no mspt line.\n\n");
+}
+
+/// Where the report links a chart: the URL a `name url` line of the chart URLs gives for it, as CI
+/// uploads each chart to a page of its own, or else the file beside the report.
+fn chartLink(allocator: std.mem.Allocator, urls: []const u8, name: []const u8) ![]const u8 {
     var lines = std.mem.tokenizeScalar(u8, urls, '\n');
     while (lines.next()) |line| {
         var fields = std.mem.tokenizeScalar(u8, line, ' ');
         if (!std.mem.eql(u8, fields.next() orelse continue, name)) continue;
-        link = @constCast(fields.next() orelse continue);
+        return fields.next() orelse continue;
     }
-    try writer.print("![{s}: CPU time, tick time, traffic and memory by number of {s}, on log scales]({s})\n\n", .{ title, axis(kind), link });
-    try writer.writeAll("Log scales, so a server using a hundred times more than another reads as clearly as one using twice as much. A gap in a line is a player count without a result, and a server with no tick times of its own has no mspt line.\n\n");
+    return std.fmt.allocPrint(allocator, "charts/{s}", .{name});
+}
+
+/// How long each server takes to start and how much it keeps on disk, which no player count
+/// changes. Both come from the idle runs alone, so the idle scenario's job draws the same chart
+/// from its own results as the report does from all of them.
+fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, directory: []const u8, urls: []const u8, runs: []const Object) !void {
+    const terrains = [_]server_module.Terrain{ .flat, .real };
+    comptime std.debug.assert(terrains.len == charts.terrains.len);
+    var startup: std.ArrayList(charts.Row) = .empty;
+    var world: std.ArrayList(charts.Row) = .empty;
+    for (std.enums.values(server_module.Kind)) |server| {
+        var started: charts.Row = .{ .server = server, .values = @splat(null) };
+        var kept: charts.Row = .{ .server = server, .values = @splat(null) };
+        for (terrains, 0..) |terrain, index| {
+            var samples: std.ArrayList(f64) = .empty;
+            // The world after the idle run with the fewest players, the least it can keep.
+            var fewest: ?Object = null;
+            for (runs) |run| {
+                if (!matches(run, terrain, .idle) or !std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) continue;
+                const seconds = number(run, &.{"startup_s"});
+                if (seconds > 0) try samples.append(allocator, seconds);
+                if (fewest == null or number(run, &.{"players"}) < number(fewest.?, &.{"players"})) fewest = run;
+            }
+            if (samples.items.len != 0) {
+                std.mem.sort(f64, samples.items, {}, std.sort.asc(f64));
+                started.values[index] = samples.items[samples.items.len / 2];
+            }
+            if (fewest) |run| {
+                const megabytes = number(run, &.{"world_mb"});
+                if (megabytes > 0) kept.values[index] = megabytes;
+            }
+        }
+        if (started.values[0] != null or started.values[1] != null) try startup.append(allocator, started);
+        if (kept.values[0] != null or kept.values[1] != null) try world.append(allocator, kept);
+    }
+    if (startup.items.len == 0 and world.items.len == 0) return;
+    const name = "startup-world.svg";
+    const image = try charts.dots(allocator, "Startup and world size", &.{
+        .{ .title = "Startup", .unit = "s", .rows = startup.items },
+        .{ .title = "World on disk", .unit = "MB", .rows = world.items },
+    });
+    const folder = try std.fs.path.join(allocator, &.{ directory, "charts" });
+    try std.Io.Dir.cwd().createDirPath(io, folder);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ folder, name }), .data = image });
+    try writer.print(
+        \\## Startup and world size
+        \\
+        \\**Startup** is from launching the server to its first answer to a status request, the median
+        \\of its idle runs. **World on disk** is everything the server keeps for its world after the
+        \\idle run with the fewest players, caches included. On real terrain every server but SteelMC starts
+        \\from the same pregenerated world, which SteelMC generates itself.
+        \\
+        \\![Startup time and world size on disk of every server, flat and real terrain, on log scales]({s})
+        \\
+        \\| Server | Startup flat s | Startup real s | World flat MB | World real MB |
+        \\|---|---:|---:|---:|---:|
+        \\
+    , .{try chartLink(allocator, urls, name)});
+    for (std.enums.values(server_module.Kind)) |server| {
+        const started = for (startup.items) |row| {
+            if (row.server == server) break row;
+        } else charts.Row{ .server = server, .values = @splat(null) };
+        const kept = for (world.items) |row| {
+            if (row.server == server) break row;
+        } else charts.Row{ .server = server, .values = @splat(null) };
+        if (started.values[0] == null and started.values[1] == null and kept.values[0] == null and kept.values[1] == null) continue;
+        try writer.print("| {s} ", .{@tagName(server)});
+        for ([_]?f64{ started.values[0], started.values[1], kept.values[0], kept.values[1] }) |value| {
+            if (value) |v| try writer.print("| {d:.1} ", .{v}) else try writer.writeAll("| n/a ");
+        }
+        try writer.writeAll("|\n");
+    }
+    try writer.writeByte('\n');
 }
 
 fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, players: u64) !void {

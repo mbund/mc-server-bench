@@ -64,18 +64,7 @@ pub fn svg(allocator: std.mem.Allocator, title: []const u8, axis: []const u8, co
     const writer = &output.writer;
     const rows = (panels.len + 1) / 2;
     const height = header + rows * (panel_height + gap);
-    try writer.print(
-        \\<svg xmlns="http://www.w3.org/2000/svg" width="{d}" height="{d}" viewBox="0 0 {d} {d}">
-        \\<style>
-        \\.bg{{fill:#ffffff}} .grid{{stroke:#d1d9e0}} .axis{{stroke:#818b98}} .t1{{fill:#1f2328}} .t2{{fill:#59636e}} .ring{{stroke:#ffffff}}
-        \\@media (prefers-color-scheme: dark){{.bg{{fill:#0d1117}} .grid{{stroke:#2f353d}} .axis{{stroke:#656c76}} .t1{{fill:#f0f6fc}} .t2{{fill:#9198a1}} .ring{{stroke:#0d1117}}}}
-        \\text{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12px}}
-        \\.title{{font-size:16px;font-weight:600}} .panel{{font-size:13px;font-weight:600}}
-        \\</style>
-        \\<rect class="bg" width="100%" height="100%"/>
-        \\<text class="t1 title" x="{d}" y="24">{s}</text>
-        \\
-    , .{ width, height, width, height, margin, title });
+    try begin(writer, height, title);
     try legend(writer, panels);
     for (panels, 0..) |panel, index| {
         const x: f64 = @floatFromInt(margin + (index % 2) * (panel_width + gap));
@@ -227,4 +216,115 @@ test "decades label as numbers" {
     try std.testing.expectEqualStrings("100", decadeLabel(&buffer, 2));
     try std.testing.expectEqualStrings("10k", decadeLabel(&buffer, 4));
     try std.testing.expectEqualStrings("1M", decadeLabel(&buffer, 6));
+}
+
+/// The SVG element with the styles every chart shares, its background and its title.
+fn begin(writer: *std.Io.Writer, height: usize, title: []const u8) !void {
+    try writer.print(
+        \\<svg xmlns="http://www.w3.org/2000/svg" width="{d}" height="{d}" viewBox="0 0 {d} {d}">
+        \\<style>
+        \\.bg{{fill:#ffffff}} .grid{{stroke:#d1d9e0}} .axis{{stroke:#818b98}} .t1{{fill:#1f2328}} .t2{{fill:#59636e}} .ring{{stroke:#ffffff}}
+        \\@media (prefers-color-scheme: dark){{.bg{{fill:#0d1117}} .grid{{stroke:#2f353d}} .axis{{stroke:#656c76}} .t1{{fill:#f0f6fc}} .t2{{fill:#9198a1}} .ring{{stroke:#0d1117}}}}
+        \\text{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12px}}
+        \\.title{{font-size:16px;font-weight:600}} .panel{{font-size:13px;font-weight:600}}
+        \\</style>
+        \\<rect class="bg" width="100%" height="100%"/>
+        \\<text class="t1 title" x="{d}" y="24">{s}</text>
+        \\
+    , .{ width, height, width, height, margin, title });
+}
+
+/// One server's value on each terrain, null where it has none.
+pub const Row = struct {
+    server: Server,
+    values: [terrains.len]?f64,
+};
+
+pub const DotPanel = struct {
+    title: []const u8,
+    unit: []const u8,
+    rows: []const Row,
+};
+
+/// The terrains a dot chart sets side by side, each its own color and shape so neither is told
+/// by color alone: flat as a circle, real as a square.
+pub const terrains = [_][]const u8{ "flat", "real" };
+const terrain_colors = [_][]const u8{ "#3987e5", "#d95926" };
+
+const row_height = 22;
+const name_width = 136;
+
+/// A row per server and a dot per terrain on a log scale, for a measure of the server itself
+/// rather than of how it grows, like how long it takes to start. Panels sit side by side.
+pub fn dots(allocator: std.mem.Allocator, title: []const u8, panels: []const DotPanel) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    const writer = &output.writer;
+    var rows: usize = 0;
+    for (panels) |panel| rows = @max(rows, panel.rows.len);
+    const panel_rows = (panels.len + 1) / 2;
+    const block = plot_top + rows * row_height + plot_bottom;
+    try begin(writer, header + panel_rows * (block + gap), title);
+    var x: f64 = margin;
+    for (terrains, terrain_colors, 0..) |name, color, index| {
+        try marker(writer, index, x + 6, 42, color);
+        try writer.print("<text class=\"t1\" x=\"{d:.1}\" y=\"46\">{s} terrain</text>\n", .{ x + 16, name });
+        x += 16 + 7.2 * @as(f64, @floatFromInt(name.len + 8)) + 18;
+    }
+    for (panels, 0..) |panel, index| {
+        const left: f64 = @floatFromInt(margin + (index % 2) * (panel_width + gap));
+        const top: f64 = @floatFromInt(header + (index / 2) * (block + gap));
+        try dotPanel(writer, left, top, panel);
+    }
+    try writer.writeAll("</svg>\n");
+    return output.toOwnedSlice();
+}
+
+fn dotPanel(writer: *std.Io.Writer, x: f64, y: f64, panel: DotPanel) !void {
+    try writer.print("<text class=\"t1 panel\" x=\"{d:.1}\" y=\"{d:.1}\">{s} ({s}, log scale)</text>\n", .{ x, y + 16, panel.title, panel.unit });
+    const left = x + name_width;
+    const right = x + panel_width - 24;
+    const top = y + plot_top;
+    const bottom = top + @as(f64, @floatFromInt(panel.rows.len * row_height));
+    var minimum = std.math.inf(f64);
+    var maximum = -std.math.inf(f64);
+    for (panel.rows) |row| for (row.values) |value| if (value) |v| {
+        minimum = @min(minimum, v);
+        maximum = @max(maximum, v);
+    };
+    if (minimum > maximum) return;
+    const low = @floor(std.math.log10(minimum));
+    var high = @ceil(std.math.log10(maximum));
+    if (high <= low) high = low + 1;
+    const scale = struct {
+        fn at(value: f64, l: f64, h: f64, a: f64, b: f64) f64 {
+            return a + (std.math.log10(value) - l) / (h - l) * (b - a);
+        }
+    }.at;
+    // A recessive line at every decade, labelled below.
+    var decade = low;
+    while (decade <= high) : (decade += 1) {
+        const at = scale(std.math.pow(f64, 10, decade), low, high, left, right);
+        var label: [16]u8 = undefined;
+        try writer.print("<line class=\"grid\" x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke-width=\"1\"/><text class=\"t2\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"middle\">{s}</text>\n", .{ at, top, at, bottom, at, bottom + 16, decadeLabel(&label, @intFromFloat(decade)) });
+    }
+    for (panel.rows, 0..) |row, index| {
+        const middle = top + (@as(f64, @floatFromInt(index)) + 0.5) * row_height;
+        try writer.print("<text class=\"t1\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"end\">{s}</text>", .{ left - 10, middle + 4, @tagName(row.server) });
+        try writer.print("<line class=\"grid\" x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke-width=\"1\" stroke-dasharray=\"2 3\"/>", .{ left, middle, right, middle });
+        for (row.values, terrain_colors, 0..) |value, color, terrain| if (value) |v| {
+            try writer.print("<g><title>{s}, {s} terrain: {d:.2} {s}</title>", .{ @tagName(row.server), terrains[terrain], v, panel.unit });
+            try marker(writer, terrain, scale(v, low, high, left, right), middle, color);
+            try writer.writeAll("</g>");
+        };
+        try writer.writeByte('\n');
+    }
+}
+
+/// A circle for the first terrain and a square for the second, ringed in the background color.
+fn marker(writer: *std.Io.Writer, shape: usize, x: f64, y: f64, color: []const u8) !void {
+    if (shape == 0) {
+        try writer.print("<circle class=\"ring\" cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"5\" fill=\"{s}\" stroke-width=\"2\"/>", .{ x, y, color });
+    } else {
+        try writer.print("<rect class=\"ring\" x=\"{d:.1}\" y=\"{d:.1}\" width=\"10\" height=\"10\" fill=\"{s}\" stroke-width=\"2\"/>", .{ x - 5, y - 5, color });
+    }
 }
