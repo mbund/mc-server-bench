@@ -294,15 +294,16 @@ jobs:
         with:
           scenario: cows
 
-  # Every scenario's results in one report, also when one of them failed.
+  # Every scenario's results in one report, also when one of them failed. Its charts go to the
+  # charts branch, a folder per run, which serves them as images the run's summary can show.
   report:
     needs: [idle, wander, spread, explore, build, cows]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
-    # To find the charts the scenario jobs uploaded.
     permissions:
-      actions: read
+      contents: write
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: harness
@@ -310,17 +311,30 @@ jobs:
         with:
           pattern: results-*
           path: results
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
+      - run: |
           tar -xzf harness.tar.gz
           mkdir -p runs/standard
           cat results/*/results.jsonl > runs/standard/results.jsonl
-          # The page of every chart, which the report shows as an image.
-          gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
-            --jq '.artifacts[] | select(.name | endswith(".svg")) | "\(.name) ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/\(.id)"' > chart-urls.txt
-          ./zig-out/bin/bench report runs/standard --chart-urls=chart-urls.txt
+          ./zig-out/bin/bench report runs/standard --charts-url="https://raw.githubusercontent.com/${{ github.repository }}/charts/${{ github.run_id }}"
           cat runs/standard/report.md >> "$GITHUB_STEP_SUMMARY"
+      - run: |
+          if git fetch --depth=1 origin charts; then
+            git worktree add charts-branch FETCH_HEAD
+          else
+            git worktree add --orphan -b charts charts-branch
+          fi
+          cd charts-branch
+          mkdir -p "${{ github.run_id }}"
+          cp ../runs/standard/charts/*.svg "${{ github.run_id }}/"
+          git add "${{ github.run_id }}"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -q -m "charts: run ${{ github.run_id }}"
+          # Runs finishing together each add their own folder, so a push that lost the race
+          # takes the other's first.
+          for _ in 1 2; do
+            git push origin HEAD:charts && exit 0
+            git pull --rebase --depth=1 origin charts
+          done
+          git push origin HEAD:charts
       - uses: actions/upload-artifact@v7
         with:
           name: report

@@ -44,8 +44,8 @@ pub fn main(init: std.process.Init) !void {
     const verb = args[1];
     if (std.mem.eql(u8, verb, "report")) {
         if (args.len != 3 and args.len != 4) return usage();
-        const urls = if (args.len == 4) (if (std.mem.startsWith(u8, args[3], "--chart-urls=")) args[3]["--chart-urls=".len..] else return usage()) else null;
-        return report.write(allocator, init.io, args[2], urls);
+        const charts_url = if (args.len == 4) (if (std.mem.startsWith(u8, args[3], "--charts-url=")) args[3]["--charts-url=".len..] else return usage()) else null;
+        return report.write(allocator, init.io, args[2], charts_url);
     }
     var settings: Settings = .{};
     for (args[2..]) |argument| try parseOption(&settings, argument);
@@ -88,7 +88,7 @@ fn usage() error{InvalidArguments} {
         \\usage:
         \\  bench run --server=<name> --scenario=<name> [--terrain=flat|real] [--players=<count>] [--cows=<count>] [options]
         \\                                    measure one server in one scenario, adding its result to <out>/results.jsonl
-        \\  bench report <directory> [--chart-urls=<file of "name url" lines>]
+        \\  bench report <directory> [--charts-url=<where the charts are published>]
         \\  bench pregen [--server=vanilla|steel] [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate the real terrain world with vanilla, or add a dimension to it
         \\servers: vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion

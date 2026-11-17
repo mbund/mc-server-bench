@@ -9,9 +9,8 @@ const charts = @import("charts.zig");
 
 const Object = std.json.ObjectMap;
 
-pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, chart_urls: ?[]const u8) !void {
+pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, charts_url: ?[]const u8) !void {
     const cwd = std.Io.Dir.cwd();
-    const urls = if (chart_urls) |path| try cwd.readFileAlloc(io, path, allocator, .limited(1 << 20)) else "";
     const lines = try cwd.readFileAlloc(io, try std.fs.path.join(allocator, &.{ directory, "results.jsonl" }), allocator, .limited(1 << 30));
     var runs: std.ArrayList(Object) = .empty;
     var each = std.mem.tokenizeScalar(u8, lines, '\n');
@@ -61,7 +60,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         \\
     );
 
-    try startupSection(allocator, io, writer, directory, urls, runs.items);
+    try startupSection(allocator, io, writer, directory, charts_url, runs.items);
     for ([_]server_module.Terrain{ .real, .flat }) |terrain| for (std.enums.values(scenario.Kind)) |kind| {
         var counts: std.ArrayList(u64) = .empty;
         for (runs.items) |run| {
@@ -73,7 +72,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         std.mem.sort(u64, counts.items, {}, std.sort.asc(u64));
         try writer.print("## {s} terrain, {s}\n\n{s}\n\n", .{ terrainName(terrain), @tagName(kind), kind.description() });
         try machines(allocator, writer, runs.items, terrain, kind);
-        if (counts.items.len > 1) try chartSection(allocator, io, writer, directory, urls, runs.items, terrain, kind, counts.items);
+        if (counts.items.len > 1) try chartSection(allocator, io, writer, directory, charts_url, runs.items, terrain, kind, counts.items);
         for (counts.items) |players| try table(writer, runs.items, terrain, kind, players);
     };
     const path = try std.fs.path.join(allocator, &.{ directory, "report.md" });
@@ -103,7 +102,7 @@ fn machines(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const 
 /// Draws a scenario's charts into the report's charts directory and links them. The link is the
 /// URL a `name url` line of the chart URLs gives for the file, as CI uploads each chart to a page
 /// of its own, or else the file beside the report.
-fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, directory: []const u8, urls: []const u8, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, counts: []const u64) !void {
+fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, directory: []const u8, charts_url: ?[]const u8, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, counts: []const u64) !void {
     var panels: std.ArrayList(charts.Panel) = .empty;
     for (charts.measures) |measure| {
         var series: std.ArrayList(charts.Series) = .empty;
@@ -130,26 +129,20 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
     const folder = try std.fs.path.join(allocator, &.{ directory, "charts" });
     try std.Io.Dir.cwd().createDirPath(io, folder);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ folder, name }), .data = image });
-    try writer.print("![{s}: CPU time, tick time, traffic and memory by number of {s}, on log scales]({s})\n\n", .{ title, kind.counted(), try chartLink(allocator, urls, name) });
+    try writer.print("![{s}: CPU time, tick time, traffic and memory by number of {s}, on log scales]({s})\n\n", .{ title, kind.counted(), try chartLink(allocator, charts_url, name) });
     try writer.writeAll("Log scales, so a server using a hundred times more than another reads as clearly as one using twice as much. A gap in a line is a player count without a result, and a server with no tick times of its own has no mspt line.\n\n");
 }
 
-/// Where the report links a chart: the URL a `name url` line of the chart URLs gives for it, as CI
-/// uploads each chart to a page of its own, or else the file beside the report.
-fn chartLink(allocator: std.mem.Allocator, urls: []const u8, name: []const u8) ![]const u8 {
-    var lines = std.mem.tokenizeScalar(u8, urls, '\n');
-    while (lines.next()) |line| {
-        var fields = std.mem.tokenizeScalar(u8, line, ' ');
-        if (!std.mem.eql(u8, fields.next() orelse continue, name)) continue;
-        return fields.next() orelse continue;
-    }
-    return std.fmt.allocPrint(allocator, "charts/{s}", .{name});
+/// Where the report links a chart: under the URL the charts were published to, as CI publishes
+/// them where the run's summary can show them, or else the file beside the report.
+fn chartLink(allocator: std.mem.Allocator, charts_url: ?[]const u8, name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ charts_url orelse "charts", name });
 }
 
 /// How long each server takes to start and how much it keeps on disk, which no player count
 /// changes. Both come from the idle runs alone, so the idle scenario's job draws the same chart
 /// from its own results as the report does from all of them.
-fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, directory: []const u8, urls: []const u8, runs: []const Object) !void {
+fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, directory: []const u8, charts_url: ?[]const u8, runs: []const Object) !void {
     const terrains = [_]server_module.Terrain{ .flat, .real };
     comptime std.debug.assert(terrains.len == charts.terrains.len);
     var startup: std.ArrayList(charts.Row) = .empty;
@@ -201,7 +194,7 @@ fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writ
         \\| Server | Startup flat s | Startup real s | World flat MB | World real MB |
         \\|---|---:|---:|---:|---:|
         \\
-    , .{try chartLink(allocator, urls, name)});
+    , .{try chartLink(allocator, charts_url, name)});
     for (std.enums.values(server_module.Kind)) |server| {
         const started = for (startup.items) |row| {
             if (row.server == server) break row;
