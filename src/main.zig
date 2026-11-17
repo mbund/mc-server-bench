@@ -102,7 +102,7 @@ fn usage() error{InvalidArguments} {
         \\  bench report <directory>
         \\  bench pregen [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate the real terrain world with vanilla, or add a dimension to it
-        \\servers: vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric
+        \\servers: vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion
         \\scenarios: idle wander spread explore build
         \\options: --warmup=<s> --seconds=<s> --server-cpus=<list> --bot-cpus=<list>
         \\         --bot-threads=<n> --join-interval=<ms> --out=<directory> --keep-worlds
