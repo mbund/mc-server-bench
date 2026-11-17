@@ -18,7 +18,8 @@ pub const Settings = struct {
     server: ?server_module.Kind = null,
     scenario: ?scenario.Kind = null,
     terrain: server_module.Terrain = .flat,
-    players: usize = 1,
+    /// The players of each step of the run, which goes on to the next while the server keeps up.
+    players: []const usize = &.{1},
     /// Cows the cows scenario summons around its player.
     cows: usize = 0,
     warmup_s: u64 = 20,
@@ -61,8 +62,9 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, verb, "run")) return usage();
     const server = settings.server orelse return usage();
     const kind = settings.scenario orelse return usage();
-    // Cows come only with the cows scenario, which always has some.
-    if (settings.players == 0 or (kind == .cows) != (settings.cows > 0)) return usage();
+    // Steps grow, and cows come only with the cows scenario, which always has some.
+    if (settings.players.len == 0 or settings.players[0] == 0 or (kind == .cows) != (settings.cows > 0)) return usage();
+    for (settings.players[1..], settings.players[0 .. settings.players.len - 1]) |after, before| if (after <= before) return usage();
     // Before pinning, while every CPU still counts.
     const host = try hostInfo(allocator, init.io);
     // Bots keep to their own CPUs, apart from the server's.
@@ -71,24 +73,15 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.Dir.cwd().createDirPath(init.io, settings.out);
     const results_path = try std.fs.path.join(allocator, &.{ settings.out, "results.jsonl" });
 
-    const count = if (kind == .cows) settings.cows else settings.players;
-    std.log.info("{s} {s} on {s} terrain with {d} {s}", .{ @tagName(server), @tagName(kind), @tagName(settings.terrain), count, kind.counted() });
-    var result = try measure(allocator, init.io, root, settings, server, kind, settings.players, settings.cows);
-    result.version = try server_module.version(server, allocator, init.io, root);
-    result.host = host;
-    try append(allocator, init.io, results_path, result);
-    std.log.info("  {d:.2} cpu ms/tick, {d:.1} tps, {d:.2} mspt, {d:.0} MB peak, {d:.1} KB/s per player, {d:.1} MB written, world {d:.1} MB, {d} problems", .{
-        result.window.cpu_ms_per_tick, result.window.tps, result.window.mspt.mean_ms, result.peak_rss_mb,
-        result.window.received_kb_per_s_per_player, result.window.disk_write_mb, result.world_mb, result.problems.len,
-    });
-    if (result.problems.len != 0) std.log.warn("the run had problems, see {s}", .{results_path});
+    try measure(allocator, init.io, root, settings, server, kind, settings.players, settings.cows, results_path, host);
 }
 
 fn usage() error{InvalidArguments} {
     std.log.err(
         \\usage:
-        \\  bench run --server=<name> --scenario=<name> [--terrain=flat|real] [--players=<count>] [--cows=<count>] [options]
-        \\                                    measure one server in one scenario, adding its result to <out>/results.jsonl
+        \\  bench run --server=<name> --scenario=<name> [--terrain=flat|real|wide] [--players=<count>,...] [--cows=<count>] [options]
+        \\                                    measure one server in one scenario, a step for each count of players while it
+        \\                                    keeps up, adding a result for each to <out>/results.jsonl
         \\  bench report <directory> [--charts-url=<where the charts are published>]
         \\  bench pregen [--server=vanilla|steel] [--terrain=flat|real|wide] [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate the real terrain world with vanilla, or add a dimension to it
@@ -110,7 +103,10 @@ fn parseOption(settings: *Settings, argument: []const u8) !void {
     } else if (std.mem.eql(u8, name, "--scenario")) {
         settings.scenario = try parseName(scenario.Kind, value);
     } else if (std.mem.eql(u8, name, "--players")) {
-        settings.players = try std.fmt.parseInt(usize, value, 10);
+        var list: std.ArrayList(usize) = .empty;
+        var items = std.mem.tokenizeScalar(u8, value, ',');
+        while (items.next()) |item| try list.append(std.heap.page_allocator, try std.fmt.parseInt(usize, item, 10));
+        settings.players = list.items;
     } else if (std.mem.eql(u8, name, "--cows")) {
         settings.cows = try std.fmt.parseInt(usize, value, 10);
     } else if (std.mem.eql(u8, name, "--warmup")) {
@@ -197,6 +193,12 @@ pub const Window = struct {
     chunks_per_s: f64 = 0,
     disk_read_mb: f64 = 0,
     disk_write_mb: f64 = 0,
+    /// Round trips of the pings players sent in the window, and how many came back.
+    ping_p50_ms: f64 = 0,
+    ping_p99_ms: f64 = 0,
+    pings: u64 = 0,
+    /// The share of the bots' own CPUs they kept busy.
+    bot_cpu: f64 = 0,
 };
 
 /// The machine a run measured on, as runs in CI land on different ones.
@@ -268,6 +270,8 @@ pub const Result = struct {
     /// Everything the bots received over the whole run, per player.
     traffic: TrafficSummary = .{},
     problems: []const []const u8 = &.{},
+    /// The limit this step broke, which ended the run, or empty when the server kept up.
+    limit: []const u8 = "",
     samples: []const Sample = &.{},
 };
 
@@ -288,6 +292,7 @@ pub const BotSummary = struct {
     failed: usize = 0,
     corrections: u64 = 0,
     chunks: u64 = 0,
+    chunk_bytes: u64 = 0,
     unloads: u64 = 0,
     players_seen: u64 = 0,
     entities_seen: u64 = 0,
@@ -348,11 +353,11 @@ const Run = struct {
     }
 
     fn joined(self: *Run) bool {
-        return self.swarm.reached(.spawned_ns) + self.swarm.count(.failed) == self.swarm.bots.len;
+        return self.swarm.reached(.spawned_ns) + self.swarm.count(.failed) == self.swarm.admitted;
     }
 
     fn viewed(self: *Run) bool {
-        return self.swarm.reached(.viewed_ns) + self.swarm.count(.failed) == self.swarm.bots.len;
+        return self.swarm.reached(.viewed_ns) + self.swarm.count(.failed) == self.swarm.admitted;
     }
 
     fn sawCows(self: *Run) bool {
@@ -360,18 +365,43 @@ const Run = struct {
     }
 
     fn arrived(self: *Run) bool {
-        return self.swarm.reached(.arrived_ns) + self.swarm.count(.failed) == self.swarm.bots.len;
+        return self.swarm.reached(.arrived_ns) + self.swarm.count(.failed) == self.swarm.admitted;
     }
 };
 
-fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings, kind: server_module.Kind, scenario_kind: scenario.Kind, players: usize, cows: usize) !Result {
-    const directory = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}/{s}/{d}", .{ settings.out, @tagName(settings.terrain), @tagName(scenario_kind), @tagName(kind), if (scenario_kind == .cows) cows else players });
+/// What makes a step of players too many. A step that breaks one ends the run, recorded with the
+/// limit it broke, so the step before it is the most the server held.
+const limits = struct {
+    /// The server falling behind, from the world time the bots receive.
+    const tps = 19.0;
+    /// The server answering a player's ping late, which it does as it handles their packets.
+    const ping_p99_ms = 200.0;
+    /// The bots' own CPUs this busy, when the bots rather than the server set the limit.
+    const bot_cpu = 0.95;
+};
+
+/// Measures one server in one scenario. The server starts once, then each count of players in
+/// `steps` joins in turn, settles and is measured, adding a result for each to `results_path`, until
+/// a step breaks a limit. One step is a plain run.
+fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings, kind: server_module.Kind, scenario_kind: scenario.Kind, steps: []const usize, cows: usize, results_path: []const u8, host: Host) !void {
+    const most = std.mem.max(usize, steps);
+    const label = if (scenario_kind == .cows) try std.fmt.allocPrint(allocator, "{d}", .{cows}) else if (steps.len == 1) try std.fmt.allocPrint(allocator, "{d}", .{steps[0]}) else "ramp";
+    const directory = try std.fmt.allocPrint(allocator, "{s}/{s}/{s}/{s}/{s}", .{ settings.out, @tagName(settings.terrain), @tagName(scenario_kind), @tagName(kind), label });
     std.Io.Dir.cwd().deleteTree(io, directory) catch {};
     const metrics = try std.fmt.allocPrint(allocator, "/dev/shm/mc-server-bench-{d}", .{linux.getpid()});
     std.Io.Dir.cwd().deleteTree(io, metrics) catch {};
     defer std.Io.Dir.cwd().deleteTree(io, metrics) catch {};
-    var result: Result = .{ .server = @tagName(kind), .terrain = @tagName(settings.terrain), .scenario = @tagName(scenario_kind), .players = players, .cows = cows, .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(), .startup_s = 0 };
-    var problems: std.ArrayList([]const u8) = .empty;
+    var base: Result = .{
+        .server = @tagName(kind),
+        .version = try server_module.version(kind, allocator, io, root),
+        .host = host,
+        .terrain = @tagName(settings.terrain),
+        .scenario = @tagName(scenario_kind),
+        .players = 0,
+        .cows = cows,
+        .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(),
+        .startup_s = 0,
+    };
 
     if (bot.probe(config.port)) return error.PortInUse;
     const launched = now();
@@ -379,7 +409,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         .kind = kind,
         .root = root,
         .directory = directory,
-        .players = players,
+        .players = most,
         .cows = cows,
         .cpus = settings.server_cpus.?,
         .metrics = metrics,
@@ -394,35 +424,102 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         if (now() - launched > 300 * std.time.ns_per_s) return error.ServerNeverReady;
         try io.sleep(.fromMilliseconds(100), .awake);
     }
-    result.startup_s = seconds(now() - launched);
+    base.startup_s = seconds(now() - launched);
     try server.configure();
 
     var dump: ?linux.fd_t = null;
-    if (settings.dump_frames) |base| {
-        const path = try std.fmt.allocPrintSentinel(allocator, "{s}-{s}-{s}-{d}.bin", .{ base, @tagName(kind), @tagName(scenario_kind), players }, 0);
+    if (settings.dump_frames) |prefix| {
+        const path = try std.fmt.allocPrintSentinel(allocator, "{s}-{s}-{s}-{s}.bin", .{ prefix, @tagName(kind), @tagName(scenario_kind), label }, 0);
         dump = @intCast(linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644));
     }
     defer if (dump) |fd| {
         _ = linux.close(fd);
     };
-    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump }, players, settings.bot_threads);
+    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump }, most, settings.bot_threads);
     var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched, .cows = cows };
     try swarm.start();
     var swarm_stopped = false;
     defer if (!swarm_stopped) swarm.stop();
 
+    var last: Result = base;
+    for (steps, 0..) |players, index| {
+        std.log.info("{s} {s} on {s} terrain with {d} players{s}", .{ @tagName(kind), @tagName(scenario_kind), @tagName(settings.terrain), players, if (cows > 0) try std.fmt.allocPrint(allocator, " among {d} cows", .{cows}) else "" });
+        const result = step(allocator, io, settings, &run, kind, scenario_kind, players, index == 0, launched, metrics, base) catch |err| failed: {
+            var broken = base;
+            broken.players = players;
+            broken.limit = if (err == error.ServerExited) "the server exited" else @errorName(err);
+            broken.problems = try allocator.dupe([]const u8, &.{broken.limit});
+            break :failed broken;
+        };
+        // Startup is the first step's, the same for every later one.
+        if (index == 0) {
+            base.first_chunk_s = result.first_chunk_s;
+            base.full_view_s = result.full_view_s;
+        }
+        std.log.info("  {d:.2} cpu ms/tick, {d:.1} tps, {d:.2} mspt, ping p99 {d:.1} ms, {d:.0} MB, {d:.1} KB/s per player, {d} problems{s}{s}", .{
+            result.window.cpu_ms_per_tick, result.window.tps,                          result.window.mspt.mean_ms, result.window.ping_p99_ms,
+            result.window.rss_mb_max,      result.window.received_kb_per_s_per_player, result.problems.len,        if (result.limit.len != 0) ", stopping: " else "",
+            result.limit,
+        });
+        if (result.limit.len != 0 or index == steps.len - 1) {
+            last = result;
+            break;
+        }
+        try append(allocator, io, results_path, result);
+    }
+
+    // What only the end of the run tells, which goes with its last step.
+    run.phase = "stop";
+    swarm.stop();
+    swarm_stopped = true;
+    last.traffic = try traffic(allocator, swarm);
+    var problems: std.ArrayList([]const u8) = .fromOwnedSlice(@constCast(last.problems));
+    if (!server.exited.load(.acquire)) {
+        const before_stop = try process.sample(server.pid);
+        last.peak_rss_mb = megabytes(before_stop.peak_rss_bytes);
+        last.total_disk_write_mb = megabytes(before_stop.disk_write_bytes);
+    }
+    const ending = try server.stop(180);
+    stopped = true;
+    last.stop_s = ending.seconds;
+    last.clean_stop = ending.clean;
+    if (!ending.clean) try problems.append(allocator, "the server did not stop in time and was killed");
+    for (kind.worldPaths()) |name| {
+        const world = try std.fs.path.join(allocator, &.{ directory, name });
+        last.world_mb += megabytes(diskUsage(allocator, io, world) catch 0);
+        if (!settings.keep_worlds) std.Io.Dir.cwd().deleteTree(io, world) catch {};
+    }
+    if (last.world_mb == 0) try problems.append(allocator, "the server saved no world");
+    last.problems = problems.items;
+    try append(allocator, io, results_path, last);
+    try writeJson(allocator, io, try std.fs.path.join(allocator, &.{ directory, "result.json" }), last);
+    if (last.problems.len != 0) std.log.warn("the run had problems, see {s}", .{results_path});
+}
+
+/// One step of a run: the players up to `players` join, settle and are measured, and the step
+/// is checked against the limits.
+fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run, kind: server_module.Kind, scenario_kind: scenario.Kind, players: usize, first_step: bool, launched: u64, metrics: []const u8, base: Result) !Result {
+    const swarm = run.swarm;
+    const server = run.server;
+    var result = base;
+    result.players = players;
+    var problems: std.ArrayList([]const u8) = .empty;
+    const newcomers = players - swarm.admitted;
+    const admitted_at = now();
+    swarm.admit(players);
+
     run.phase = "join";
-    if (!try run.wait(players * settings.join_interval_ms / 1000 + 120, Run.joined)) try problems.append(allocator, "not every bot joined in time");
-    result.join_s = seconds(latest(swarm, .spawned_ns) -| swarm.started_ns);
-    if (cows > 0) {
+    if (!try run.wait(newcomers * settings.join_interval_ms / 1000 + 120, Run.joined)) try problems.append(allocator, "not every bot joined in time");
+    result.join_s = seconds(latest(swarm, .spawned_ns) -| admitted_at);
+    if (first_step and run.cows > 0) {
         // The cows around the player once it is in, before warming up, and every one of them
         // sent to it.
         run.phase = "cows";
         // Servers load the field around the player while it joins, and refuse a cow in a chunk
         // not yet loaded, so the cows come once the player holds a full view.
         if (!try run.wait(120, Run.viewed)) try problems.append(allocator, "the player had no full view to summon cows in");
-        try server.summonCows(cows, swarm.bots[0].origin);
-        if (!try run.wait(120, Run.sawCows)) try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ swarm.total(.cows_seen), cows }));
+        try server.summonCows(run.cows, swarm.bots[0].origin);
+        if (!try run.wait(120, Run.sawCows)) try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ swarm.total(.cows_seen), run.cows }));
     }
     if (scenario_kind.travels()) {
         run.phase = "travel";
@@ -438,19 +535,24 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     const first = run.samples.items.len - 1;
     const window_start = now();
     const first_usage = try process.sample(server.pid);
+    const first_bots = try process.sample(linux.getpid());
     const first_threads = try threadTimes(allocator, io, server.pid);
     const first_time, const first_time_ns = swarm.gameTime();
     const first_received = swarm.total(.bytes_in);
     const first_sent = swarm.total(.bytes_out);
     const first_chunks = swarm.total(.chunks);
+    const first_corrections = swarm.total(.corrections);
+    const first_latency = swarm.latency();
     run.last_query_ns = now();
     _ = try run.wait(settings.measure_s, null);
     try server.queryTicks();
     try run.sample();
     const window_end = now();
     const last_usage = try process.sample(server.pid);
+    const last_bots = try process.sample(linux.getpid());
     const last_threads = try threadTimes(allocator, io, server.pid);
     const last_time, const last_time_ns = swarm.gameTime();
+    const last_latency = swarm.latency();
     // Give the last tick report a moment to arrive.
     try io.sleep(.fromMilliseconds(500), .awake);
 
@@ -460,6 +562,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     const ticks = if (window.tps > 0) window.tps * window.seconds else 20 * window.seconds;
     window.cpu_ms_per_tick = @as(f64, @floatFromInt(last_usage.cpu_ns - first_usage.cpu_ns)) / std.time.ns_per_ms / ticks;
     window.cpu_cores = seconds(last_usage.cpu_ns - first_usage.cpu_ns) / window.seconds;
+    window.bot_cpu = seconds(last_bots.cpu_ns - first_bots.cpu_ns) / window.seconds / @as(f64, @floatFromInt(cpuCount(settings.bot_cpus.?)));
     window.threads = try threadBreakdown(allocator, first_threads, last_threads, ticks);
     for (run.samples.items[first..]) |entry| {
         window.rss_mb_mean += entry.rss_mb;
@@ -476,44 +579,85 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         try exportedTicks(allocator, io, metrics, window_start, window_end)
     else
         reportedTicks(server, window_start, window_end + std.time.ns_per_s);
+    var pings: [bot.Latency.buckets]u64 = undefined;
+    for (&pings, first_latency, last_latency) |*count, before, after| count.* = after - before;
+    window.pings = 0;
+    for (pings) |count| window.pings += count;
+    window.ping_p50_ms = percentile(&pings, window.pings, 0.50);
+    window.ping_p99_ms = percentile(&pings, window.pings, 0.99);
     if (window.tps == 0) try problems.append(allocator, "no world time reached the bots, so ticks per second is unknown");
 
     result.view_s = try medianGap(allocator, swarm, .spawned_ns, .viewed_ns);
     result.first_chunk_s = seconds(earliest(swarm, .first_chunk_ns) -| launched);
     result.full_view_s = seconds(earliest(swarm, .viewed_ns) -| launched);
     result.bots = summarize(swarm);
-    try check(allocator, swarm, scenario_kind, &problems);
-
-    run.phase = "stop";
-    swarm.stop();
-    swarm_stopped = true;
-    result.traffic = try traffic(allocator, swarm);
     result.total_received_mb = megabytes(swarm.total(.bytes_in));
-    const before_stop = try process.sample(server.pid);
-    result.peak_rss_mb = megabytes(before_stop.peak_rss_bytes);
-    const ending = try server.stop(180);
-    stopped = true;
-    result.stop_s = ending.seconds;
-    result.clean_stop = ending.clean;
-    if (!ending.clean) try problems.append(allocator, "the server did not stop in time and was killed");
-    result.total_disk_write_mb = megabytes(before_stop.disk_write_bytes);
-    for (kind.worldPaths()) |name| {
-        const world = try std.fs.path.join(allocator, &.{ directory, name });
-        result.world_mb += megabytes(try diskUsage(allocator, io, world));
-        if (!settings.keep_worlds) std.Io.Dir.cwd().deleteTree(io, world) catch {};
-    }
-    if (result.world_mb == 0) try problems.append(allocator, "the server saved no world");
-
-    result.samples = run.samples.items;
+    result.peak_rss_mb = window.rss_mb_max;
+    try check(allocator, swarm, scenario_kind, &problems);
     result.problems = problems.items;
-    try writeJson(allocator, io, try std.fs.path.join(allocator, &.{ directory, "result.json" }), result);
+
+    // The first limit the step broke, in order of how plainly it is the server's.
+    const failed = swarm.count(.failed);
+    var viewless: usize = 0;
+    for (swarm.joining()) |*each| viewless += @intFromBool(each.phase.load(.acquire) != .failed and each.counters.get(.viewed_ns) == 0);
+    const corrections = swarm.total(.corrections) - first_corrections;
+    result.limit = if (failed != 0)
+        try std.fmt.allocPrint(allocator, "{d} {s} disconnected", .{ failed, if (failed == 1) "player was" else "players were" })
+    else if (window.bot_cpu >= limits.bot_cpu)
+        "the bots ran out of CPU"
+    else if (window.tps < limits.tps)
+        try std.fmt.allocPrint(allocator, "{d:.1} TPS", .{window.tps})
+    else if (window.pings != 0 and window.ping_p99_ms > limits.ping_p99_ms)
+        try std.fmt.allocPrint(allocator, "ping p99 {d:.0} ms", .{window.ping_p99_ms})
+    else if (viewless != 0)
+        try std.fmt.allocPrint(allocator, "{d} {s} no full view", .{ viewless, if (viewless == 1) "player had" else "players had" })
+    else if (corrections != 0)
+        try std.fmt.allocPrint(allocator, "players moved back {d} times", .{corrections})
+    else
+        "";
+    result.samples = run.samples.items[first..];
     return result;
+}
+
+/// The round trip a share of pings came back within, in milliseconds, from the middle of its
+/// bucket.
+fn percentile(counts: []const u64, total: u64, share: f64) f64 {
+    if (total == 0) return 0;
+    const wanted: u64 = @intFromFloat(@ceil(@as(f64, @floatFromInt(total)) * share));
+    var seen: u64 = 0;
+    for (counts, 0..) |count, index| {
+        seen += count;
+        if (seen >= wanted) return bot.Latency.milliseconds(index);
+    }
+    return bot.Latency.milliseconds(counts.len - 1);
+}
+
+/// CPUs in a list like 0-3,8.
+fn cpuCount(list: []const u8) usize {
+    var count: usize = 0;
+    var ranges = std.mem.tokenizeScalar(u8, list, ',');
+    while (ranges.next()) |range| {
+        const dash = std.mem.indexOfScalar(u8, range, '-') orelse {
+            count += 1;
+            continue;
+        };
+        const low = std.fmt.parseInt(usize, range[0..dash], 10) catch continue;
+        const high = std.fmt.parseInt(usize, range[dash + 1 ..], 10) catch continue;
+        count += high - low + 1;
+    }
+    return @max(1, count);
+}
+
+test "cpu lists count every cpu" {
+    try std.testing.expectEqual(@as(usize, 5), cpuCount("0-3,8"));
+    try std.testing.expectEqual(@as(usize, 1), cpuCount("2"));
 }
 
 /// What the bots must have seen for a run to count: everyone in, a full view each, the server
 /// never pulling anyone back, and whatever the scenario asks for.
 fn check(allocator: std.mem.Allocator, swarm: *bot.Swarm, kind: scenario.Kind, problems: *std.ArrayList([]const u8)) !void {
-    for (swarm.bots) |*each| {
+    const players = swarm.joining().len;
+    for (swarm.joining()) |*each| {
         const counters = &each.counters;
         if (each.phase.load(.acquire) == .failed) {
             try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} failed: {s} {s}", .{ each.label(), @errorName(each.failure.?), each.reasonText() }));
@@ -523,8 +667,8 @@ fn check(allocator: std.mem.Allocator, swarm: *bot.Swarm, kind: scenario.Kind, p
         if (counters.get(.corrections) != 0) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} was moved back {d} times", .{ each.label(), counters.get(.corrections) }));
         if (counters.get(.keepalives) == 0) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} got no keep alive", .{each.label()}));
         switch (kind) {
-            .idle, .wander => if (counters.get(.players_seen) + 1 < swarm.bots.len)
-                try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} saw {d} of {d} other players", .{ each.label(), counters.get(.players_seen), swarm.bots.len - 1 })),
+            .idle, .wander => if (counters.get(.players_seen) + 1 < players)
+                try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} saw {d} of {d} other players", .{ each.label(), counters.get(.players_seen), players - 1 })),
             .spread, .build => if (counters.get(.arrived_ns) == 0) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} never reached its spot", .{each.label()})),
             // Measured when the cows were summoned, before warming up.
             .explore, .cows => {},
@@ -549,6 +693,7 @@ fn summarize(swarm: *bot.Swarm) BotSummary {
         .failed = swarm.count(.failed),
         .corrections = swarm.total(.corrections),
         .chunks = swarm.total(.chunks),
+        .chunk_bytes = swarm.total(.chunk_bytes),
         .unloads = swarm.total(.unloads),
         .players_seen = swarm.total(.players_seen),
         .entities_seen = swarm.total(.entities_seen),
@@ -759,7 +904,7 @@ fn medianGap(allocator: std.mem.Allocator, swarm: *bot.Swarm, from: bot.Counter,
 }
 
 fn traffic(allocator: std.mem.Allocator, swarm: *bot.Swarm) !TrafficSummary {
-    const players: f64 = @floatFromInt(swarm.bots.len);
+    const players: f64 = @floatFromInt(swarm.joining().len);
     var summary: TrafficSummary = .{};
     var totals: [256]bot.Traffic = @splat(.{});
     for (swarm.bots) |*each| {

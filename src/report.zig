@@ -75,6 +75,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         try writer.print("## {s} terrain, {s}\n\n{s}\n\n", .{ terrainName(terrain), @tagName(kind), kind.description() });
         try machines(allocator, writer, runs.items, terrain, kind);
         if (counts.items.len > 1) try chartSection(allocator, io, writer, directory, charts_url, runs.items, terrain, kind, counts.items);
+        try heldTable(writer, runs.items, terrain, kind);
         for (counts.items) |players| try table(writer, runs.items, terrain, kind, players);
     };
     const path = try std.fs.path.join(allocator, &.{ directory, "report.md" });
@@ -235,33 +236,67 @@ fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writ
     try writer.writeByte('\n');
 }
 
+/// How far each server went before breaking a limit: the most it kept up with, and what ended its
+/// run, or that it kept up with every step.
+fn heldTable(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind) !void {
+    try writer.print(
+        \\| Server | Most {s} held | Ended by |
+        \\|---|---:|---|
+        \\
+    , .{kind.counted()});
+    for (std.enums.values(server_module.Kind)) |server| {
+        var held: f64 = 0;
+        var tried: f64 = 0;
+        var ended: []const u8 = "";
+        for (runs) |run| {
+            if (!matches(run, terrain, kind) or !std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) continue;
+            const count = number(run, &.{kind.counted()});
+            tried = @max(tried, count);
+            const limit = text(run, &.{"limit"});
+            if (limit.len == 0) held = @max(held, count) else ended = limit;
+        }
+        if (tried == 0) continue;
+        if (ended.len == 0) {
+            try writer.print("| {s} | {d:.0} | kept up with every step |\n", .{ @tagName(server), held });
+        } else if (held == 0) {
+            try writer.print("| {s} | none | {s} |\n", .{ @tagName(server), ended });
+        } else try writer.print("| {s} | {d:.0} | {s} |\n", .{ @tagName(server), held, ended });
+    }
+    try writer.writeByte('\n');
+}
+
 fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, players: u64) !void {
-    try writer.print("### {d} {s}\n\n", .{ players, if (players == 1) kind.counted()[0 .. kind.counted().len - 1] else kind.counted() });
+    // Folded away, as a ramp measures many counts.
+    try writer.print("<details><summary>{d} {s}</summary>\n\n", .{ players, if (players == 1) kind.counted()[0 .. kind.counted().len - 1] else kind.counted() });
+    defer writer.writeAll("</details>\n\n") catch {};
     try writer.writeAll(
-        \\| Server | Total KB | KB/s | KB/chunk | Chunks | CPU ms/tick | mspt mean | mspt p99 | TPS | Peak RAM MB | Disk MB | World MB | Problems |
-        \\|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+        \\| Server | Total KB | KB/s | KB/chunk | Chunks | CPU ms/tick | mspt mean | mspt p99 | TPS | Ping p99 ms | Peak RAM MB | Disk MB | World MB | Problems |
+        \\|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
         \\
     );
     var problems: usize = 0;
     for (std.enums.values(server_module.Kind)) |server| {
         const run = latest(runs, server, terrain, kind, players) orelse continue;
-        const chunks = chunkTraffic(run);
         const reported = !std.mem.eql(u8, text(run, &.{ "window", "mspt", "source" }), "none");
         const count = if (run.get("problems")) |value| value.array.items.len else 0;
         problems += count;
+        // Per player, over the run until this step was measured.
+        const present = @max(1, number(run, &.{"players"}));
+        const chunks = number(run, &.{ "bots", "chunks" });
         try writer.print("| {s} | {d:.0} | {d:.2} | {d:.2} | {d:.0} | {d:.2} | ", .{
             @tagName(server),
-            number(run, &.{ "traffic", "setup_kb_per_player" }) + number(run, &.{ "traffic", "play_kb_per_player" }),
+            number(run, &.{"total_received_mb"}) * 1024 / present,
             number(run, &.{ "window", "received_kb_per_s_per_player" }),
-            if (chunks.count == 0) 0 else chunks.kb / chunks.count,
-            chunks.count,
+            if (chunks == 0) 0 else number(run, &.{ "bots", "chunk_bytes" }) / 1024 / chunks,
+            chunks / present,
             number(run, &.{ "window", "cpu_ms_per_tick" }),
         });
         if (reported) {
             try writer.print("{d:.2} | {d:.2} | ", .{ number(run, &.{ "window", "mspt", "mean_ms" }), number(run, &.{ "window", "mspt", "p99_ms" }) });
         } else try writer.writeAll("n/a | n/a | ");
-        try writer.print("{d:.1} | {d:.0} | {d:.1} | {d:.1} | {d} |\n", .{
-            number(run, &.{ "window", "tps" }),
+        try writer.print("{d:.1} | ", .{number(run, &.{ "window", "tps" })});
+        if (number(run, &.{ "window", "pings" }) > 0) try writer.print("{d:.1} | ", .{number(run, &.{ "window", "ping_p99_ms" })}) else try writer.writeAll("n/a | ");
+        try writer.print("{d:.0} | {d:.1} | {d:.1} | {d} |\n", .{
             number(run, &.{"peak_rss_mb"}),
             number(run, &.{ "window", "disk_write_mb" }),
             number(run, &.{"world_mb"}),
@@ -295,16 +330,6 @@ fn latest(runs: []const Object, server: server_module.Kind, terrain: server_modu
         found = run;
     }
     return found;
-}
-
-fn chunkTraffic(run: Object) struct { kb: f64, count: f64 } {
-    const traffic = run.get("traffic") orelse return .{ .kb = 0, .count = 0 };
-    const packets = traffic.object.get("packets") orelse return .{ .kb = 0, .count = 0 };
-    for (packets.array.items) |packet| {
-        if (!std.mem.eql(u8, text(packet.object, &.{"name"}), "map_chunk")) continue;
-        return .{ .kb = number(packet.object, &.{"kb_per_player"}), .count = number(packet.object, &.{"count_per_player"}) };
-    }
-    return .{ .kb = 0, .count = 0 };
 }
 
 fn lookup(object: Object, path: []const []const u8) ?std.json.Value {

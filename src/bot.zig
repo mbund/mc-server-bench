@@ -59,6 +59,44 @@ pub const Counter = enum {
     arrived_ns,
 };
 
+/// Round trips of pings, in buckets a quarter of a power of two wide in microseconds, so any
+/// percentile is within about 12% at every scale. Bots record into their own and the swarm adds
+/// them up.
+pub const Latency = struct {
+    pub const buckets = 104;
+    counts: [buckets]std.atomic.Value(u32) = @splat(.init(0)),
+
+    pub fn bucket(us: u64) usize {
+        if (us < 4) return @intCast(us);
+        const octave: usize = 63 - @clz(us);
+        const sub: usize = @intCast((us >> @intCast(octave - 2)) & 3);
+        return @min(buckets - 1, (octave - 1) * 4 + sub);
+    }
+
+    /// The middle of a bucket, in milliseconds.
+    pub fn milliseconds(index: usize) f64 {
+        if (index < 4) return @as(f64, @floatFromInt(index)) / 1000;
+        const octave = index / 4 + 1;
+        const low: f64 = @floatFromInt(@as(u64, 4 + index % 4) << @intCast(octave - 2));
+        const width: f64 = @floatFromInt(@as(u64, 1) << @intCast(octave - 2));
+        return (low + width / 2) / 1000;
+    }
+
+    pub fn record(self: *Latency, us: u64) void {
+        _ = self.counts[bucket(us)].fetchAdd(1, .monotonic);
+    }
+};
+
+test "latency buckets order round trips and keep within an eighth" {
+    var previous: usize = 0;
+    for ([_]u64{ 0, 3, 4, 7, 8, 15, 1000, 1200, 50_000, 3_000_000 }) |us| {
+        const index = Latency.bucket(us);
+        try std.testing.expect(index >= previous);
+        previous = index;
+        if (us >= 8) try std.testing.expect(@abs(Latency.milliseconds(index) * 1000 - @as(f64, @floatFromInt(us))) <= @as(f64, @floatFromInt(us)) / 8);
+    }
+}
+
 pub const Counters = struct {
     values: [@typeInfo(Counter).@"enum".field_names.len]std.atomic.Value(u64) = @splat(.init(0)),
 
@@ -124,6 +162,9 @@ pub const Bot = struct {
     reason: [160]u8 = undefined,
     reason_len: u8 = 0,
     counters: Counters = .{},
+    latency: Latency = .{},
+    /// When the bot may start joining, once the swarm admits it.
+    due_ns: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
     /// What the server sent before play, and in play by packet id: as it crossed the wire,
     /// compressed, and as decoded. Only the bot's worker writes these, so they are read after
     /// the swarm stops.
@@ -394,6 +435,10 @@ pub const Bot = struct {
             try self.queue(packet.bytes());
         } else if (id == In.packetId(.unload_chunk)) {
             self.counters.add(.unloads, 1);
+        } else if (id == In.packetId(.ping_response)) {
+            const sent: u64 = @bitCast(try reader.int(i64));
+            const moment = now();
+            if (moment > sent) self.latency.record((moment - sent) / std.time.ns_per_us);
         } else if (id == In.packetId(.keep_alive)) {
             var packet: Packet = .init(&buffer, Out.packetId(.keep_alive));
             packet.int(i64, try reader.int(i64));
@@ -473,6 +518,16 @@ pub const Bot = struct {
             packet.int(u32, @bitCast(self.pitch));
         }
         packet.int(u8, @intFromBool(self.on_ground));
+        try self.queue(packet.bytes());
+    }
+
+    /// A ping request the server answers as it handles the bot's packets, once a second, which
+    /// times how long the server takes to respond.
+    pub fn ping(self: *Bot) !void {
+        if ((self.ticks + self.index) % 20 != 0) return;
+        var buffer: [16]u8 = undefined;
+        var packet: Packet = .init(&buffer, Protocol.play.toServer.packetId(.ping_request));
+        packet.int(i64, @bitCast(now()));
         try self.queue(packet.bytes());
     }
 
@@ -569,7 +624,8 @@ const Worker = struct {
             var next_join: u64 = std.math.maxInt(u64);
             for (swarm.bots[self.first..self.last]) |*bot| {
                 if (bot.phase.load(.monotonic) != .waiting) continue;
-                const due = swarm.started_ns + bot.index * swarm.config.join_interval_ns;
+                const due = bot.due_ns.load(.acquire);
+                if (due == std.math.maxInt(u64)) continue;
                 if (moment < due) {
                     next_join = @min(next_join, due);
                     continue;
@@ -579,6 +635,7 @@ const Worker = struct {
             if (moment >= next_tick) {
                 for (swarm.bots[self.first..self.last]) |*bot| {
                     if (bot.phase.load(.monotonic) != .play or !bot.spawned) continue;
+                    bot.ping() catch |err| bot.fail(err, "ping failed");
                     scenario.step(swarm.config.kind, bot, swarm.bots.len) catch |err| bot.fail(err, "scenario step failed");
                     bot.ticks += 1;
                 }
@@ -623,6 +680,8 @@ pub const Swarm = struct {
     workers: []Worker,
     started_ns: u64 = 0,
     stopping: std.atomic.Value(bool) = .init(false),
+    /// Bots allowed to join, the first ones by index.
+    admitted: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: Configuration, bots: usize, threads: usize) !*Swarm {
         assert(bots > 0 and threads > 0);
@@ -660,9 +719,32 @@ pub const Swarm = struct {
         return self;
     }
 
+    /// Starts the workers with no bot admitted yet.
     pub fn start(self: *Swarm) !void {
         self.started_ns = now();
         for (self.workers) |*worker| worker.thread = try std.Thread.spawn(.{}, Worker.run, .{worker});
+    }
+
+    /// Lets the first `count` bots join, the newly admitted ones a join interval apart from now.
+    pub fn admit(self: *Swarm, players: usize) void {
+        assert(players >= self.admitted and players <= self.bots.len);
+        const moment = now();
+        for (self.bots[self.admitted..players], 0..) |*each, order| each.due_ns.store(moment + order * self.config.join_interval_ns, .release);
+        self.admitted = players;
+    }
+
+    /// The admitted bots.
+    pub fn joining(self: *Swarm) []Bot {
+        return self.bots[0..self.admitted];
+    }
+
+    /// Every bot's ping round trips added up.
+    pub fn latency(self: *const Swarm) [Latency.buckets]u64 {
+        var sum: [Latency.buckets]u64 = @splat(0);
+        for (self.bots) |*each| for (&sum, &each.latency.counts) |*summed, *value| {
+            summed.* += value.load(.monotonic);
+        };
+        return sum;
     }
 
     pub fn stop(self: *Swarm) void {
