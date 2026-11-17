@@ -73,6 +73,7 @@ jobs:
           retention-days: 1
 
   build:
+    name: build ${{ matrix.name }}
     needs: terrain
     runs-on: ubuntu-26.04
     strategy:
@@ -153,6 +154,7 @@ jobs:
           retention-days: 1
 
   bench:
+    name: bench ${{ matrix.scenario }}
     needs: build
     runs-on: ubuntu-26.04
     timeout-minutes: 360
