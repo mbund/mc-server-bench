@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Everyone flies outward into terrain never generated before, with 1, 16 and 256 players, on flat
-# terrain, which every server generates alike.
+# Everyone flies back and forth across the pregenerated flat world without stopping, with 1, 16
+# and 256 players, so servers load and send terrain from disk rather than generate it.
 # Usage: scenarios/explore.sh [server]...
 source "$(dirname "$0")/common.sh"
 for players in 1 16 256; do

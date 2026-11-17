@@ -30,7 +30,7 @@ pub const Kind = enum {
     wander,
     /// Everyone flies to a spot of their own, far from the others, and stays there.
     spread,
-    /// Everyone flies outward without stopping, into terrain never generated before.
+    /// Everyone flies back and forth across the pregenerated flat world, never stopping.
     explore,
     /// Everyone places and breaks blocks at a spot of their own near spawn.
     build,
@@ -52,7 +52,7 @@ pub const Kind = enum {
             .idle => "Everyone stands still at spawn.",
             .wander => "Everyone flies at walking speed at random within 24 blocks of spawn, in sight of each other.",
             .spread => "Everyone flies to a spot of their own, far enough apart that views never overlap, and hovers there.",
-            .explore => "Everyone flies outward at 20 blocks a second into terrain never generated before.",
+            .explore => "Everyone flies back and forth across the pregenerated world at 20 blocks a second, so servers load and send terrain from disk.",
             .build => "Everyone places or breaks a block every tick at a spot of their own near spawn.",
             .cows => "One player stands at spawn among cows summoned two blocks apart on a square field around them, all in view and ticking.",
         };
@@ -133,9 +133,22 @@ fn spread(bot: *Bot, count: usize) !void {
     }
 }
 
+/// Blocks from spawn where an exploring bot turns back, so its view stays inside the flat world
+/// every server pregenerated.
+const explore_reach: f64 = @floatFromInt((@import("server.zig").Terrain.flat.radius() - view_distance - 1) * 16);
+
+/// Back and forth along a line of its own through spawn, turning where its view would leave the
+/// pregenerated world, so every chunk it reaches is on disk and none is generated.
 fn explore(bot: *Bot) !void {
     if (!try rise(bot)) return;
-    const angle = @as(f64, @floatFromInt(bot.index + 1)) * golden_angle;
+    // The heading is 0 flying out along the bot's line and pi flying back.
+    var angle = @as(f64, @floatFromInt(bot.index + 1)) * golden_angle + bot.heading;
+    const dx = bot.position[0] - bot.origin[0];
+    const dz = bot.position[2] - bot.origin[2];
+    if (dx * dx + dz * dz >= explore_reach * explore_reach and dx * @cos(angle) + dz * @sin(angle) > 0) {
+        bot.heading = if (bot.heading == 0) std.math.pi else 0;
+        angle += std.math.pi;
+    }
     bot.position[0] += @cos(angle) * flight_speed;
     bot.position[2] += @sin(angle) * flight_speed;
     bot.yaw = yawOf(angle);
