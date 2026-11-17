@@ -80,9 +80,14 @@ fi
 if wants lightning-rod; then
   zig build -Drelease lightning-rod -p "$build/lightning-rod"
   record lightning-rod
-  if [ ! -d "$build/terrain/lightning-rod" ]; then
+  # Another commit may read the caches of an earlier import as outdated and start cold, so the
+  # import is redone whenever the commit changes.
+  imported=$build/terrain/lightning-rod.commit
+  if [ ! -d "$build/terrain/lightning-rod" ] || ! cmp -s "$imported" "$build/versions/lightning-rod"; then
+    rm -rf "$build/terrain/lightning-rod"
     (cd servers/lightning-rod/tools/world-import && zig build -Doptimize=ReleaseSafe -p "$build/world-import")
     "$build/world-import/bin/world-import" --input "$build/terrain/vanilla/world" --output "$build/terrain/lightning-rod" --skip-unsupported --prewarm
+    cp "$build/versions/lightning-rod" "$imported"
   fi
 fi
 
