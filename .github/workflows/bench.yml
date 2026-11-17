@@ -33,13 +33,27 @@ jobs:
         with:
           distribution: temurin
           java-version: 25
-      # The worlds depend only on the vanilla release, the seed and the generator settings.
+      - id: keys
+        run: |
+          echo "lightning-rod=$(git rev-parse HEAD:servers/lightning-rod)" >> "$GITHUB_OUTPUT"
+          # The worlds depend only on the vanilla release and the settings and code that generate
+          # them, of which setup.sh holds the release and the flat layers.
+          echo "terrain=$( (grep -E '^sha=|generator-settings|level-type' setup.sh; cat src/main.zig src/server.zig src/config.zig) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v5
         with:
           path: |
             servers/build/terrain/vanilla
             servers/build/flat
-          key: terrain-${{ hashFiles('setup.sh', 'src/main.zig', 'src/server.zig', 'src/config.zig') }}
+          key: terrain-${{ steps.keys.outputs.terrain }}
+      # Zig's compile caches, so an unchanged harness builds in seconds and a changed one rebuilds
+      # only what changed since the last.
+      - uses: actions/cache@v5
+        with:
+          path: |
+            /tmp/mc-server-bench-zig
+            ~/.cache/zig
+          key: zig-harness-${{ steps.keys.outputs.lightning-rod }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+          restore-keys: zig-harness-
       - run: ./setup.sh bench terrain
       # Vanilla's own account of a failed world generation, which stays on the runner otherwise.
       - if: failure()
@@ -105,6 +119,16 @@ jobs:
           mkdir -p "$RUNNER_TEMP/zig"
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      # Zig's compile caches from the last Lightning Rod build, so a new commit rebuilds only what
+      # it changed.
+      - if: steps.cache.outputs.cache-hit != 'true' && matrix.name == 'lightning-rod'
+        uses: actions/cache@v5
+        with:
+          path: |
+            /tmp/mc-server-bench-zig
+            ~/.cache/zig
+          key: zig-${{ steps.key.outputs.key }}
+          restore-keys: zig-build-lightning-rod-
       - if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/setup-java@v6
         with:
