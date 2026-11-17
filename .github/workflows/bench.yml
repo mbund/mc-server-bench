@@ -1,9 +1,9 @@
-# The standard benchmark. Vanilla generates the worlds once, every server builds in a job of its
-# own, then every scenario runs on a machine of its own with every server on it, one after
-# another, so the servers within a scenario compare on the same machine. The last job joins their
-# results into one Markdown report, shown on the run's summary page and kept as an artifact.
-# Toolchains are installed directly at the versions the flake pins, which is much faster than
-# installing Nix on every runner.
+# The standard benchmark. Vanilla generates the worlds once and every server builds in a job of
+# its own. Then every scenario runs in a job of its own, with every server one after another on
+# that job's machine, so the servers within a scenario compare on the same machine. The last job
+# joins their results into one Markdown report, shown on the run's summary page and kept as an
+# artifact. Toolchains are installed directly at the versions the flake pins, which is much faster
+# than installing Nix on every runner.
 name: Benchmark
 
 on:
@@ -20,19 +20,15 @@ env:
   MC_SERVER_BENCH_ZIG_CPU: x86_64_v3
 
 jobs:
+  # The harness, and the worlds every server reads: the real terrain vanilla pregenerates and the
+  # flat settings Pumpkin reads.
   terrain:
     runs-on: ubuntu-26.04
     outputs:
       terrain: ${{ steps.keys.outputs.terrain }}
     steps:
       - uses: actions/checkout@v7
-      # Zig 0.17.0, which the flake pins, checked against the hash ziglang.org publishes.
-      - run: |
-          curl -fsSL -o "$RUNNER_TEMP/zig.tar.xz" https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
-          echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  $RUNNER_TEMP/zig.tar.xz" | sha256sum --check
-          mkdir -p "$RUNNER_TEMP/zig"
-          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
-          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/zig
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -61,7 +57,7 @@ jobs:
       - run: ./setup.sh bench terrain
       # Vanilla's own account of a failed world generation, which stays on the runner otherwise.
       - if: failure()
-        run: tail -n 200 servers/build/terrain/vanilla/server.log || true
+        run: tail -n 200 servers/build/terrain/vanilla/server.log
       - run: |
           tar -czf harness.tar.gz zig-out/bin/bench
           tar -czf terrain.tar.gz servers/build/terrain/vanilla servers/build/flat
@@ -76,95 +72,138 @@ jobs:
           path: terrain.tar.gz
           retention-days: 1
 
-  build:
-    name: build ${{ matrix.name }}
+  # Each build is reused for as long as its submodule's commit and the files that decide it stay
+  # the same, and only the build itself is skipped when it is.
+
+  # Lightning Rod, and the real terrain imported with its caches built.
+  build-lightning-rod:
     needs: terrain
     runs-on: ubuntu-26.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # What setup.sh builds, the files that decide the build, and what the runs need of it.
-          # Pumpkin and SteelMC depend on only their own part of setup.sh, its section. A build is
-          # reused for as long as its submodule commit and these stay the same.
-          - name: lightning-rod
-            targets: lightning-rod
-            submodules: lightning-rod
-            inputs: setup.sh build.zig build.zig.zon src/lightning_rod_server.zig src/config.zig src/main.zig src/server.zig
-            outputs: servers/build/lightning-rod servers/build/terrain/lightning-rod servers/build/versions/lightning-rod
-          - name: pumpkin
-            targets: pumpkin
-            submodules: pumpkin
-            section: pumpkin
-            outputs: servers/pumpkin/target/release/pumpkin servers/build/versions/pumpkin
-          - name: steel
-            targets: steel
-            submodules: steel
-            section: steel
-            inputs: patches/steel-console-stdin.patch patches/steel-forceload.patch
-            outputs: servers/steel/target/release/steel servers/steel/package-content servers/build/versions/steel
-          - name: java
-            targets: vanilla paper paper-antixray-1 fabric fabric-occlusion
-            submodules: occlusion
-            inputs: setup.sh patches/occlusion-26.2.patch
-            outputs: servers/vanilla servers/paper servers/fabric
     steps:
       - uses: actions/checkout@v7
       - id: key
-        run: |
-          commits=$(for name in ${{ matrix.submodules }}; do git rev-parse "HEAD:servers/$name"; done)
-          echo "key=build-${{ matrix.name }}-$( (echo "$commits"; cat /dev/null ${{ matrix.inputs }}; awk '/^if wants ${{ matrix.section }}; then/,/^fi$/' setup.sh) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+        run: echo "key=lightning-rod-$( (git rev-parse HEAD:servers/lightning-rod; cat setup.sh build.zig build.zig.zon src/lightning_rod_server.zig src/config.zig src/main.zig src/server.zig) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
       - id: cache
         uses: actions/cache@v5
         with:
-          path: build-${{ matrix.name }}.tar.gz
+          path: build-lightning-rod.tar.gz
           key: ${{ steps.key.outputs.key }}
-      # Zig 0.17.0, which the flake pins, checked against the hash ziglang.org publishes.
-      - if: steps.cache.outputs.cache-hit != 'true' && matrix.name == 'lightning-rod'
-        run: |
-          curl -fsSL -o "$RUNNER_TEMP/zig.tar.xz" https://ziglang.org/download/0.17.0/zig-x86_64-linux-0.17.0.tar.xz
-          echo "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026  $RUNNER_TEMP/zig.tar.xz" | sha256sum --check
-          mkdir -p "$RUNNER_TEMP/zig"
-          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
-          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/zig
       # Zig's compile caches from the last Lightning Rod build, so a new commit rebuilds only what
       # it changed.
-      - if: steps.cache.outputs.cache-hit != 'true' && matrix.name == 'lightning-rod'
-        uses: actions/cache@v5
+      - uses: actions/cache@v5
         with:
           path: |
             /tmp/mc-server-bench-zig
             ~/.cache/zig
           key: zig-${{ steps.key.outputs.key }}
-          restore-keys: zig-build-lightning-rod-
-      - if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 25
-      # SteelMC links with lld.
-      - if: steps.cache.outputs.cache-hit != 'true' && matrix.name == 'steel'
-        run: sudo apt-get update && sudo apt-get install -y lld
-      - if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/download-artifact@v8
+          restore-keys: zig-lightning-rod-
+      - uses: actions/download-artifact@v8
         with:
           name: terrain
       - if: steps.cache.outputs.cache-hit != 'true'
         run: |
           tar -xzf terrain.tar.gz
-          ./setup.sh ${{ matrix.targets }}
-          tar -czf build-${{ matrix.name }}.tar.gz ${{ matrix.outputs }}
+          ./setup.sh lightning-rod
+          tar -czf build-lightning-rod.tar.gz servers/build/lightning-rod servers/build/terrain/lightning-rod servers/build/versions/lightning-rod
       - uses: actions/upload-artifact@v7
         with:
-          name: build-${{ matrix.name }}
-          path: build-${{ matrix.name }}.tar.gz
+          name: build-lightning-rod
+          path: build-lightning-rod.tar.gz
+          retention-days: 1
+
+  build-pumpkin:
+    needs: terrain
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      # Pumpkin depends on only its own part of setup.sh.
+      - id: key
+        run: echo "key=pumpkin-$( (git rev-parse HEAD:servers/pumpkin; awk '/^if wants pumpkin; then/,/^fi$/' setup.sh) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@v5
+        with:
+          path: build-pumpkin.tar.gz
+          key: ${{ steps.key.outputs.key }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: terrain
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          tar -xzf terrain.tar.gz
+          ./setup.sh pumpkin
+          tar -czf build-pumpkin.tar.gz servers/pumpkin/target/release/pumpkin servers/build/versions/pumpkin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-pumpkin
+          path: build-pumpkin.tar.gz
+          retention-days: 1
+
+  build-steel:
+    needs: terrain
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      # SteelMC depends on only its own part of setup.sh and the patches that part applies.
+      - id: key
+        run: echo "key=steel-$( (git rev-parse HEAD:servers/steel; awk '/^if wants steel; then/,/^fi$/' setup.sh; cat patches/steel-*.patch) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@v5
+        with:
+          path: build-steel.tar.gz
+          key: ${{ steps.key.outputs.key }}
+      # SteelMC links with lld.
+      - run: sudo apt-get update && sudo apt-get install -y lld
+      - uses: actions/download-artifact@v8
+        with:
+          name: terrain
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          tar -xzf terrain.tar.gz
+          ./setup.sh steel
+          tar -czf build-steel.tar.gz servers/steel/target/release/steel servers/steel/package-content servers/build/versions/steel
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-steel
+          path: build-steel.tar.gz
+          retention-days: 1
+
+  # Vanilla, Paper and Fabric, with Occlusion built from its patched source.
+  build-java:
+    needs: terrain
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+      - id: key
+        run: echo "key=java-$( (git rev-parse HEAD:servers/occlusion; cat setup.sh patches/occlusion-26.2.patch) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache@v5
+        with:
+          path: build-java.tar.gz
+          key: ${{ steps.key.outputs.key }}
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 25
+      - uses: actions/download-artifact@v8
+        with:
+          name: terrain
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          tar -xzf terrain.tar.gz
+          ./setup.sh vanilla paper paper-antixray-1 fabric fabric-occlusion
+          tar -czf build-java.tar.gz servers/vanilla servers/paper servers/fabric
+      - uses: actions/upload-artifact@v7
+        with:
+          name: build-java
+          path: build-java.tar.gz
           retention-days: 1
 
   # SteelMC reads no vanilla worlds, so it generates the same square of real terrain itself. The
   # world depends on what generates the vanilla one and on SteelMC's build, so it is kept apart
   # from the build, which takes far longer and changes less.
-  steel-terrain:
-    needs: [terrain, build]
+  terrain-steel:
+    needs: [terrain, build-steel]
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
@@ -193,61 +232,72 @@ jobs:
           path: terrain-steel.tar.gz
           retention-days: 1
 
-  bench:
-    name: bench ${{ matrix.scenario }}
-    needs: [build, steel-terrain]
+  # Every scenario on a machine of its own, every server in turn.
+
+  idle:
+    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-steel]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        scenario: [idle, wander, spread, explore, build, cows]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v6
+      - uses: ./.github/actions/scenario
         with:
-          distribution: temurin
-          java-version: 25
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: "{harness,terrain,terrain-steel,build-*}"
-          merge-multiple: true
-      - run: for archive in *.tar.gz; do tar -xzf "$archive"; done
-      - run: MC_SERVER_BENCH_BUILT=1 ./run.sh --scenarios=${{ matrix.scenario }}
-      # The report and its charts for the runs that finished, when the sweep stopped early.
-      - if: failure()
-        run: test ! -f runs/standard/results.jsonl || ./zig-out/bin/bench report runs/standard
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: results-${{ matrix.scenario }}
-          path: runs/standard/results.jsonl
-          if-no-files-found: ignore
-      # Each chart unzipped, as an artifact of its own named after its file, so the report can
-      # show it as an image.
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          path: runs/standard/charts/real-${{ matrix.scenario }}.svg
-          archive: false
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          path: runs/standard/charts/flat-${{ matrix.scenario }}.svg
-          archive: false
-          if-no-files-found: ignore
-      # Startup and world size come from the idle runs alone, so the idle job draws them.
-      - if: always() && matrix.scenario == 'idle'
-        uses: actions/upload-artifact@v7
-        with:
-          path: runs/standard/charts/startup-world.svg
-          archive: false
-          if-no-files-found: ignore
+          scenario: idle
 
+  wander:
+    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-steel]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/scenario
+        with:
+          scenario: wander
+
+  spread:
+    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-steel]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/scenario
+        with:
+          scenario: spread
+
+  explore:
+    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-steel]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/scenario
+        with:
+          scenario: explore
+
+  build:
+    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-steel]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/scenario
+        with:
+          scenario: build
+
+  cows:
+    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-steel]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/scenario
+        with:
+          scenario: cows
+
+  # Every scenario's results in one report, also when one of them failed.
   report:
-    needs: bench
-    if: always()
+    needs: [idle, wander, spread, explore, build, cows]
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     # To find the charts the scenario jobs uploaded.
     permissions:

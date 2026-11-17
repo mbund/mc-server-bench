@@ -1,0 +1,46 @@
+name: Scenario
+description: >
+  Runs one scenario script on every server, one after another on this machine, from the builds
+  and worlds the earlier jobs made, and keeps its results and charts.
+inputs:
+  scenario:
+    description: The script in scenarios/ to run, without its extension.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: 25
+    - uses: actions/download-artifact@v8
+      with:
+        pattern: "{harness,terrain,terrain-steel,build-*}"
+        merge-multiple: true
+    - shell: bash
+      run: |
+        for archive in *.tar.gz; do tar -xzf "$archive"; done
+        MC_SERVER_BENCH_BUILT=1 "scenarios/${{ inputs.scenario }}.sh"
+        ./zig-out/bin/bench report runs/standard
+    - uses: actions/upload-artifact@v7
+      with:
+        name: results-${{ inputs.scenario }}
+        path: runs/standard/results.jsonl
+    # Each chart unzipped, as an artifact of its own named after its file, so the report can show
+    # it as an image. A scenario on one terrain has no chart for the other, and only idle draws
+    # startup and world size.
+    - uses: actions/upload-artifact@v7
+      with:
+        path: runs/standard/charts/real-${{ inputs.scenario }}.svg
+        archive: false
+        if-no-files-found: ignore
+    - uses: actions/upload-artifact@v7
+      with:
+        path: runs/standard/charts/flat-${{ inputs.scenario }}.svg
+        archive: false
+        if-no-files-found: ignore
+    - uses: actions/upload-artifact@v7
+      with:
+        path: runs/standard/charts/startup-world.svg
+        archive: false
+        if-no-files-found: ignore
