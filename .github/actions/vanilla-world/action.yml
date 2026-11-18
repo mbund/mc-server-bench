@@ -1,0 +1,48 @@
+name: Vanilla world
+description: >
+  Vanilla's world on one terrain, which every server reading vanilla worlds starts from. It is kept
+  in the cache under the key the harness job made from what decides it, and generated only when
+  no world is kept under that key.
+inputs:
+  terrain:
+    description: The terrain, real, flat or wide.
+    required: true
+  needs:
+    description: The job's needs, as JSON, for the keys the jobs it needs made.
+    required: true
+outputs:
+  key:
+    description: The key the world is kept under.
+    value: ${{ fromJSON(inputs.needs).harness.outputs[format('vanilla-{0}', inputs.terrain)] }}
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache/restore@v5
+      with:
+        path: servers/build/worlds/${{ inputs.terrain }}/vanilla
+        key: ${{ fromJSON(inputs.needs).harness.outputs[format('vanilla-{0}', inputs.terrain)] }}
+        lookup-only: true
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: 25
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: zig-out/bin/bench
+        key: ${{ fromJSON(inputs.needs).harness.outputs.key }}
+        fail-on-cache-miss: true
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: ./setup.sh terrain-${{ inputs.terrain }}
+    # Vanilla's own account of a failed generation, which stays on the runner otherwise.
+    - if: failure()
+      shell: bash
+      run: tail -n 200 servers/build/worlds/${{ inputs.terrain }}/vanilla/server.log || true
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: servers/build/worlds/${{ inputs.terrain }}/vanilla
+        key: ${{ fromJSON(inputs.needs).harness.outputs[format('vanilla-{0}', inputs.terrain)] }}

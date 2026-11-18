@@ -1,8 +1,10 @@
 # The standard benchmark. The harness, every server and the worlds runs start from are made in
-# jobs of their own, each starting as soon as what it needs is ready. Then every scenario runs in
-# a job of its own, with every server one after another on that job's machine, so the servers
-# within a scenario compare on the same machine. The last job joins their results into one
-# Markdown report, shown on the run's summary page and kept as an artifact. Toolchains are
+# jobs of their own and kept in the cache, each under a key made from only what decides it, so
+# each is made again only when that changes. A job whose result is already kept only checks so
+# and ends. Then every scenario runs on each of its terrains in a job of its own, once every server
+# and that terrain's worlds are ready, with every server one after another on that job's machine,
+# so the servers within a scenario compare on the same machine. The last job joins their results
+# into one Markdown report, shown on the run's summary page and kept as an artifact. Toolchains are
 # installed directly at the versions the flake pins, which is much faster than installing Nix on
 # every runner.
 name: Benchmark
@@ -21,40 +23,56 @@ env:
   MC_SERVER_BENCH_CPU: x86_64_v3
 
 jobs:
-  # The harness that generates the worlds and drives every run.
+  # The harness that generates the worlds and drives every run, and the keys of the worlds it
+  # generates, made from the recipe it prints for each: the square, the settings the server
+  # generates from and the code that generates it, with vanilla's release or SteelMC's build.
   harness:
     runs-on: ubuntu-26.04
     outputs:
-      # What the worlds depend on: the vanilla release and the code that generates them.
-      terrain: ${{ steps.keys.outputs.terrain }}
+      key: ${{ steps.key.outputs.key }}
+      vanilla-real: ${{ steps.worlds.outputs.vanilla-real }}
+      vanilla-flat: ${{ steps.worlds.outputs.vanilla-flat }}
+      vanilla-wide: ${{ steps.worlds.outputs.vanilla-wide }}
+      steel-real: ${{ steps.worlds.outputs.steel-real }}
+      steel-flat: ${{ steps.worlds.outputs.steel-flat }}
+      steel-wide: ${{ steps.worlds.outputs.steel-wide }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/zig
-      - id: keys
-        run: |
-          echo "lightning-rod=$(git rev-parse HEAD:servers/lightning-rod)" >> "$GITHUB_OUTPUT"
-          echo "terrain=$( (grep -E '^sha=' setup.sh; cat src/main.zig src/server.zig src/config.zig) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
-      # Zig's compile caches, so an unchanged harness builds in seconds and a changed one rebuilds
-      # only what changed since the last.
-      - uses: actions/cache@v5
+      # Its sources, Lightning Rod's protocol packages, the toolchain and the CPU it targets.
+      - id: key
+        run: echo "key=harness-$( (git rev-parse HEAD:servers/lightning-rod; echo "$MC_SERVER_BENCH_CPU"; grep '^if wants bench; then' setup.sh; cat build.zig build.zig.zon .github/actions/zig/action.yml; find src -type f | sort | xargs cat) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+      - id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: zig-out/bin/bench
+          key: ${{ steps.key.outputs.key }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/zig
+      # Zig's compile caches, so a changed harness rebuilds only what changed since the last.
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v5
         with:
           path: |
             /tmp/mc-server-bench-zig
             ~/.cache/zig
-          key: zig-harness-${{ steps.keys.outputs.lightning-rod }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+          key: zig-${{ steps.key.outputs.key }}
           restore-keys: zig-harness-
-      - run: |
-          ./setup.sh bench
-          tar -czf harness.tar.gz zig-out/bin/bench
-      - uses: actions/upload-artifact@v7
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: ./setup.sh bench
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
         with:
-          name: harness
-          path: harness.tar.gz
-          retention-days: 1
+          path: zig-out/bin/bench
+          key: ${{ steps.key.outputs.key }}
+      - id: worlds
+        run: |
+          for terrain in real flat wide; do
+            echo "vanilla-$terrain=vanilla-$terrain-$( (./zig-out/bin/bench recipe --server=vanilla --terrain=$terrain; grep '^sha=' setup.sh; sed -n '/^pregenerate() {/,/^}/p' setup.sh) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+            echo "steel-$terrain=$( (./zig-out/bin/bench recipe --server=steel --terrain=$terrain; sed -n '/^pregenerate() {/,/^}/p; /^steel_world() {/,/^}/p' setup.sh) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+          done
 
-  # Each build is reused for as long as its submodule's commit and the files that decide it stay
-  # the same, and only the build itself is skipped when it is. Builds need no worlds, so they
-  # start at once, alongside the worlds.
+  # Each server, kept for as long as its commit, its part of setup.sh, the patches it applies and
+  # the CPU it targets stay the same. Builds need no worlds, so they start at once.
 
   # Lightning Rod in ReleaseSafe, with the tool that imports vanilla worlds into it.
   build-lightning-rod:
@@ -63,17 +81,25 @@ jobs:
       key: ${{ steps.key.outputs.key }}
     steps:
       - uses: actions/checkout@v7
+      # Its commit and the bench's files its build reads: the server it builds from Lightning
+      # Rod's packages and the settings that server shares with the bench.
       - id: key
-        run: echo "key=lightning-rod-$( (git rev-parse HEAD:servers/lightning-rod; awk '/^if wants lightning-rod; then/,/^fi$/' setup.sh; cat build.zig build.zig.zon src/lightning_rod_server.zig src/config.zig) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+        run: echo "key=lightning-rod-$( (git rev-parse HEAD:servers/lightning-rod; echo "$MC_SERVER_BENCH_CPU"; awk '/^if wants lightning-rod; then/,/^fi$/' setup.sh; cat build.zig build.zig.zon src/lightning_rod_server.zig src/config.zig .github/actions/zig/action.yml) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
       - id: cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
-          path: build-lightning-rod.tar.gz
+          path: |
+            servers/build/lightning-rod
+            servers/build/world-import
+            servers/build/versions/lightning-rod
           key: ${{ steps.key.outputs.key }}
-      - uses: ./.github/actions/zig
+          lookup-only: true
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/zig
       # Zig's compile caches from the last Lightning Rod build, so a new commit rebuilds only what
       # it changed.
-      - uses: actions/cache@v5
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v5
         with:
           path: |
             /tmp/mc-server-bench-zig
@@ -82,45 +108,51 @@ jobs:
           restore-keys: zig-lightning-rod-
       # Gradle's downloads for the snapshotter that extracts every release's registries, as Maven
       # Central turns away runners that fetch them all anew too often.
-      - uses: actions/cache@v5
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v5
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: gradle-${{ steps.key.outputs.key }}
           restore-keys: gradle-lightning-rod-
+      # Once more after a pause if Maven Central turned it away, keeping what was extracted.
       - if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          # Once more after a pause if Maven Central turned it away, keeping what was extracted.
-          ./setup.sh lightning-rod || { sleep 120; ./setup.sh lightning-rod; }
-          tar -czf build-lightning-rod.tar.gz servers/build/lightning-rod servers/build/world-import servers/build/versions/lightning-rod
-      - uses: actions/upload-artifact@v7
+        run: ./setup.sh lightning-rod || { sleep 120; ./setup.sh lightning-rod; }
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
         with:
-          name: build-lightning-rod
-          path: build-lightning-rod.tar.gz
-          retention-days: 1
+          path: |
+            servers/build/lightning-rod
+            servers/build/world-import
+            servers/build/versions/lightning-rod
+          key: ${{ steps.key.outputs.key }}
 
   build-pumpkin:
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.key.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      # Pumpkin depends on only its own part of setup.sh.
       - id: key
-        run: echo "key=pumpkin-$( (git rev-parse HEAD:servers/pumpkin; awk '/^if wants pumpkin; then/,/^fi$/' setup.sh) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+        run: echo "key=pumpkin-$( (git rev-parse HEAD:servers/pumpkin; echo "$MC_SERVER_BENCH_CPU"; awk '/^if wants pumpkin; then/,/^fi$/' setup.sh) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
       - id: cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
-          path: build-pumpkin.tar.gz
+          path: |
+            servers/pumpkin/target/release/pumpkin
+            servers/build/versions/pumpkin
           key: ${{ steps.key.outputs.key }}
+          lookup-only: true
       - if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          ./setup.sh pumpkin
-          tar -czf build-pumpkin.tar.gz servers/pumpkin/target/release/pumpkin servers/build/versions/pumpkin
-      - uses: actions/upload-artifact@v7
+        run: ./setup.sh pumpkin
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
         with:
-          name: build-pumpkin
-          path: build-pumpkin.tar.gz
-          retention-days: 1
+          path: |
+            servers/pumpkin/target/release/pumpkin
+            servers/build/versions/pumpkin
+          key: ${{ steps.key.outputs.key }}
 
   build-steel:
     runs-on: ubuntu-26.04
@@ -128,173 +160,191 @@ jobs:
       key: ${{ steps.key.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      # SteelMC depends on only its own part of setup.sh and the patches that part applies.
       - id: key
-        run: echo "key=steel-$( (git rev-parse HEAD:servers/steel; awk '/^if wants steel; then/,/^fi$/' setup.sh; cat patches/steel-*.patch) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+        run: echo "key=steel-$( (git rev-parse HEAD:servers/steel; echo "$MC_SERVER_BENCH_CPU"; awk '/^if wants steel; then/,/^fi$/' setup.sh; cat patches/steel-*.patch) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
       - id: cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
-          path: build-steel.tar.gz
+          path: |
+            servers/steel/target/release/steel
+            servers/steel/package-content
+            servers/build/versions/steel
           key: ${{ steps.key.outputs.key }}
+          lookup-only: true
       # SteelMC links with lld.
-      - run: sudo apt-get update && sudo apt-get install -y lld
       - if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          ./setup.sh steel
-          tar -czf build-steel.tar.gz servers/steel/target/release/steel servers/steel/package-content servers/build/versions/steel
-      - uses: actions/upload-artifact@v7
+        run: sudo apt-get update && sudo apt-get install -y lld
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: ./setup.sh steel
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
         with:
-          name: build-steel
-          path: build-steel.tar.gz
-          retention-days: 1
+          path: |
+            servers/steel/target/release/steel
+            servers/steel/package-content
+            servers/build/versions/steel
+          key: ${{ steps.key.outputs.key }}
 
-  # Vanilla, Paper and Fabric, with Occlusion built from its patched source.
+  # Vanilla, Paper and Fabric, with Occlusion built from its patched source, kept for as long as
+  # their parts of setup.sh, Occlusion's commit and its patch stay the same.
   build-java:
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.key.outputs.key }}
     steps:
       - uses: actions/checkout@v7
       - id: key
-        run: echo "key=java-$( (git rev-parse HEAD:servers/occlusion; cat setup.sh patches/occlusion-26.2.patch) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+        run: echo "key=java-$( (git rev-parse HEAD:servers/occlusion; awk '/^# Vanilla 26.2/,/^fi$/; /^# Paper 26.2/,/^fi$/; /^fetch_mods\(\) \{/,/^fi$/; /^if wants fabric-occlusion; then/,/^fi$/' setup.sh; cat patches/occlusion-26.2.patch) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
       - id: cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
-          path: build-java.tar.gz
+          path: |
+            servers/vanilla
+            servers/paper
+            servers/fabric
           key: ${{ steps.key.outputs.key }}
-      - uses: actions/setup-java@v6
+          lookup-only: true
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 25
       - if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          ./setup.sh vanilla paper paper-antixray-1 fabric fabric-occlusion
-          tar -czf build-java.tar.gz servers/vanilla servers/paper servers/fabric
-      - uses: actions/upload-artifact@v7
+        run: ./setup.sh vanilla paper paper-antixray-1 fabric fabric-occlusion
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
         with:
-          name: build-java
-          path: build-java.tar.gz
-          retention-days: 1
+          path: |
+            servers/vanilla
+            servers/paper
+            servers/fabric
+          key: ${{ steps.key.outputs.key }}
 
-  # The worlds runs start from, each made in a job of its own for each server family, so a run on
-  # a world waits only for that world: vanilla's, which every server reading vanilla worlds starts
-  # from, Lightning Rod's imported from them, and SteelMC's, which reads no vanilla worlds and
-  # generates the same chunks itself. Each is reused for as long as what makes it stays the same.
+  # The worlds runs start from, each in a job of its own for each server family, so a run on a
+  # terrain waits only for that terrain's worlds: vanilla's, which every server reading vanilla
+  # worlds starts from, Lightning Rod's imported from them, and SteelMC's own.
 
   terrain-real:
     needs: harness
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/world
+      - id: world
+        uses: ./.github/actions/vanilla-world
         with:
-          target: terrain-real
-          path: servers/build/worlds/real/vanilla
-          key: terrain-real-${{ needs.harness.outputs.terrain }}
-          needs: harness
-          java: true
+          terrain: real
+          needs: ${{ toJSON(needs) }}
 
   terrain-flat:
     needs: harness
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/world
+      - id: world
+        uses: ./.github/actions/vanilla-world
         with:
-          target: terrain-flat
-          path: servers/build/worlds/flat/vanilla
-          key: terrain-flat-${{ needs.harness.outputs.terrain }}
-          needs: harness
-          java: true
+          terrain: flat
+          needs: ${{ toJSON(needs) }}
 
   terrain-wide:
     needs: harness
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/world
+      - id: world
+        uses: ./.github/actions/vanilla-world
         with:
-          target: terrain-wide
-          path: servers/build/worlds/wide/vanilla
-          key: terrain-wide-${{ needs.harness.outputs.terrain }}
-          needs: harness
-          java: true
+          terrain: wide
+          needs: ${{ toJSON(needs) }}
 
   import-real:
-    needs: [harness, terrain-real, build-lightning-rod]
+    needs: [terrain-real, build-lightning-rod]
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/world
+      - id: world
+        uses: ./.github/actions/lightning-rod-world
         with:
-          target: import-real
-          path: servers/build/worlds/real/lightning-rod*
-          key: import-real-${{ needs.build-lightning-rod.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: "{terrain-real,build-lightning-rod}"
+          terrain: real
+          needs: ${{ toJSON(needs) }}
 
   import-flat:
-    needs: [harness, terrain-flat, build-lightning-rod]
+    needs: [terrain-flat, build-lightning-rod]
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/world
+      - id: world
+        uses: ./.github/actions/lightning-rod-world
         with:
-          target: import-flat
-          path: servers/build/worlds/flat/lightning-rod*
-          key: import-flat-${{ needs.build-lightning-rod.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: "{terrain-flat,build-lightning-rod}"
+          terrain: flat
+          needs: ${{ toJSON(needs) }}
 
   import-wide:
-    needs: [harness, terrain-wide, build-lightning-rod]
+    needs: [terrain-wide, build-lightning-rod]
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/world
+      - id: world
+        uses: ./.github/actions/lightning-rod-world
         with:
-          target: import-wide
-          path: servers/build/worlds/wide/lightning-rod*
-          key: import-wide-${{ needs.build-lightning-rod.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: "{terrain-wide,build-lightning-rod}"
+          terrain: wide
+          needs: ${{ toJSON(needs) }}
 
   steel-real:
     needs: [harness, build-steel]
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/world
+      - id: world
+        uses: ./.github/actions/steel-world
         with:
-          target: steel-real
-          path: servers/build/worlds/real/steel*
-          key: steel-real-${{ needs.build-steel.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: "{harness,build-steel}"
+          terrain: real
+          needs: ${{ toJSON(needs) }}
 
   steel-flat:
     needs: [harness, build-steel]
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/world
+      - id: world
+        uses: ./.github/actions/steel-world
         with:
-          target: steel-flat
-          path: servers/build/worlds/flat/steel*
-          key: steel-flat-${{ needs.build-steel.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: "{harness,build-steel}"
+          terrain: flat
+          needs: ${{ toJSON(needs) }}
 
   steel-wide:
     needs: [harness, build-steel]
     runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/world
+      - id: world
+        uses: ./.github/actions/steel-world
         with:
-          target: steel-wide
-          path: servers/build/worlds/wide/steel*
-          key: steel-wide-${{ needs.build-steel.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: "{harness,build-steel}"
+          terrain: wide
+          needs: ${{ toJSON(needs) }}
 
-  # Every scenario on each of its terrains on a machine of its own, every server in turn, starting
-  # once every server and that terrain's worlds are ready.
+  # Every scenario on each of its terrains on a machine of its own, every server in turn.
 
   idle-real:
-    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-real, import-real, steel-real]
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-real, import-real, steel-real]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     steps:
@@ -303,10 +353,10 @@ jobs:
         with:
           scenario: idle
           terrain: real
-          worlds: terrain-real,import-real,steel-real
+          needs: ${{ toJSON(needs) }}
 
   idle-flat:
-    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     steps:
@@ -315,10 +365,10 @@ jobs:
         with:
           scenario: idle
           terrain: flat
-          worlds: terrain-flat,import-flat,steel-flat
+          needs: ${{ toJSON(needs) }}
 
   wander-real:
-    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-real, import-real, steel-real]
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-real, import-real, steel-real]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     steps:
@@ -327,10 +377,10 @@ jobs:
         with:
           scenario: wander
           terrain: real
-          worlds: terrain-real,import-real,steel-real
+          needs: ${{ toJSON(needs) }}
 
   wander-flat:
-    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     steps:
@@ -339,10 +389,10 @@ jobs:
         with:
           scenario: wander
           terrain: flat
-          worlds: terrain-flat,import-flat,steel-flat
+          needs: ${{ toJSON(needs) }}
 
   spread-real:
-    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-real, import-real, steel-real]
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-real, import-real, steel-real]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     steps:
@@ -351,10 +401,10 @@ jobs:
         with:
           scenario: spread
           terrain: real
-          worlds: terrain-real,import-real,steel-real
+          needs: ${{ toJSON(needs) }}
 
   spread-wide:
-    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-wide, import-wide, steel-wide]
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-wide, import-wide, steel-wide]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     steps:
@@ -363,10 +413,10 @@ jobs:
         with:
           scenario: spread
           terrain: wide
-          worlds: terrain-wide,import-wide,steel-wide
+          needs: ${{ toJSON(needs) }}
 
   explore:
-    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     steps:
@@ -374,10 +424,11 @@ jobs:
       - uses: ./.github/actions/scenario
         with:
           scenario: explore
-          worlds: terrain-flat,import-flat,steel-flat
+          terrain: flat
+          needs: ${{ toJSON(needs) }}
 
   build:
-    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     steps:
@@ -385,10 +436,11 @@ jobs:
       - uses: ./.github/actions/scenario
         with:
           scenario: build
-          worlds: terrain-flat,import-flat,steel-flat
+          terrain: flat
+          needs: ${{ toJSON(needs) }}
 
   cows:
-    needs: [build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     steps:
@@ -396,27 +448,29 @@ jobs:
       - uses: ./.github/actions/scenario
         with:
           scenario: cows
-          worlds: terrain-flat,import-flat,steel-flat
+          terrain: flat
+          needs: ${{ toJSON(needs) }}
 
   # Every scenario's results in one report, also when one of them failed. Its charts go to the
   # charts branch, a folder per run, which serves them as images the run's summary can show.
   report:
-    needs: [idle-real, idle-flat, wander-real, wander-flat, spread-real, spread-wide, explore, build, cows]
+    needs: [harness, idle-real, idle-flat, wander-real, wander-flat, spread-real, spread-wide, explore, build, cows]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
+      - uses: actions/cache/restore@v5
         with:
-          name: harness
+          path: zig-out/bin/bench
+          key: ${{ needs.harness.outputs.key }}
+          fail-on-cache-miss: true
       - uses: actions/download-artifact@v8
         with:
           pattern: results-*
           path: results
       - run: |
-          tar -xzf harness.tar.gz
           mkdir -p runs/standard
           cat results/*/results.jsonl > runs/standard/results.jsonl
           ./zig-out/bin/bench report runs/standard --charts-url="https://raw.githubusercontent.com/${{ github.repository }}/charts/${{ github.run_id }}"

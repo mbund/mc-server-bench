@@ -1,16 +1,17 @@
 name: Scenario
 description: >
-  Runs one scenario script on every server, one after another on this machine, from the builds
-  and worlds the earlier jobs made, and keeps its results.
+  Runs one scenario script on one terrain on every server, one after another on this machine, from
+  the harness, builds and worlds the earlier jobs keep in the cache, and keeps its results. Each is
+  restored under the key the job that made it gave, with the same paths it was kept under.
 inputs:
   scenario:
     description: The script in scenarios/ to run, without its extension.
     required: true
   terrain:
-    description: The terrain to run it on, when the script runs on more than one.
-    default: ""
-  worlds:
-    description: The world artifacts its runs start from, as a list for a download pattern.
+    description: The terrain whose runs it runs, real, flat or wide.
+    required: true
+  needs:
+    description: The job's needs, as JSON, for the keys the jobs it needs made.
     required: true
 runs:
   using: composite
@@ -19,16 +20,64 @@ runs:
       with:
         distribution: temurin
         java-version: 25
-    - uses: actions/download-artifact@v8
+    - uses: actions/cache/restore@v5
       with:
-        pattern: "{harness,build-*,${{ inputs.worlds }}}"
-        merge-multiple: true
+        path: zig-out/bin/bench
+        key: ${{ fromJSON(inputs.needs).harness.outputs.key }}
+        fail-on-cache-miss: true
+    - uses: actions/cache/restore@v5
+      with:
+        path: |
+          servers/build/lightning-rod
+          servers/build/world-import
+          servers/build/versions/lightning-rod
+        key: ${{ fromJSON(inputs.needs).build-lightning-rod.outputs.key }}
+        fail-on-cache-miss: true
+    - uses: actions/cache/restore@v5
+      with:
+        path: |
+          servers/pumpkin/target/release/pumpkin
+          servers/build/versions/pumpkin
+        key: ${{ fromJSON(inputs.needs).build-pumpkin.outputs.key }}
+        fail-on-cache-miss: true
+    - uses: actions/cache/restore@v5
+      with:
+        path: |
+          servers/steel/target/release/steel
+          servers/steel/package-content
+          servers/build/versions/steel
+        key: ${{ fromJSON(inputs.needs).build-steel.outputs.key }}
+        fail-on-cache-miss: true
+    - uses: actions/cache/restore@v5
+      with:
+        path: |
+          servers/vanilla
+          servers/paper
+          servers/fabric
+        key: ${{ fromJSON(inputs.needs).build-java.outputs.key }}
+        fail-on-cache-miss: true
+    - uses: actions/cache/restore@v5
+      with:
+        path: servers/build/worlds/${{ inputs.terrain }}/vanilla
+        key: ${{ fromJSON(inputs.needs)[format('terrain-{0}', inputs.terrain)].outputs.key }}
+        fail-on-cache-miss: true
+    - uses: actions/cache/restore@v5
+      with:
+        path: |
+          servers/build/worlds/${{ inputs.terrain }}/lightning-rod
+          servers/build/worlds/${{ inputs.terrain }}/lightning-rod.version
+        key: ${{ fromJSON(inputs.needs)[format('import-{0}', inputs.terrain)].outputs.key }}
+        fail-on-cache-miss: true
+    - uses: actions/cache/restore@v5
+      with:
+        path: |
+          servers/build/worlds/${{ inputs.terrain }}/steel
+          servers/build/worlds/${{ inputs.terrain }}/steel.version
+        key: ${{ fromJSON(inputs.needs)[format('steel-{0}', inputs.terrain)].outputs.key }}
+        fail-on-cache-miss: true
     - shell: bash
-      run: |
-        # Each archive goes once unpacked, as the worlds would not all fit on the disk twice.
-        for archive in *.tar.gz; do tar -xzf "$archive" && rm "$archive"; done
-        MC_SERVER_BENCH_BUILT=1 "scenarios/${{ inputs.scenario }}.sh" ${{ inputs.terrain && format('--terrain={0}', inputs.terrain) || '' }}
+      run: MC_SERVER_BENCH_BUILT=1 "scenarios/${{ inputs.scenario }}.sh" --terrain=${{ inputs.terrain }}
     - uses: actions/upload-artifact@v7
       with:
-        name: results-${{ inputs.scenario }}${{ inputs.terrain && format('-{0}', inputs.terrain) || '' }}
+        name: results-${{ inputs.scenario }}-${{ inputs.terrain }}
         path: runs/standard/results.jsonl

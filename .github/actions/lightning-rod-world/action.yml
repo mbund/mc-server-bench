@@ -1,0 +1,55 @@
+name: Lightning Rod world
+description: >
+  Lightning Rod's world on one terrain, vanilla's imported with its caches built. It is kept in the
+  cache under a key made from Lightning Rod's commit, how setup.sh imports and vanilla's world's own
+  key, and imported only when no world is kept under that key.
+inputs:
+  terrain:
+    description: The terrain, real, flat or wide.
+    required: true
+  needs:
+    description: The job's needs, as JSON, for the keys the jobs it needs made.
+    required: true
+outputs:
+  key:
+    description: The key the world is kept under.
+    value: ${{ steps.key.outputs.key }}
+runs:
+  using: composite
+  steps:
+    - id: key
+      shell: bash
+      run: echo "key=lightning-rod-${{ inputs.terrain }}-$( (git rev-parse HEAD:servers/lightning-rod; sed -n '/^import_world() {/,/^}/p' setup.sh; echo "${{ fromJSON(inputs.needs)[format('terrain-{0}', inputs.terrain)].outputs.key }}") | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+    - id: cache
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          servers/build/worlds/${{ inputs.terrain }}/lightning-rod
+          servers/build/worlds/${{ inputs.terrain }}/lightning-rod.version
+        key: ${{ steps.key.outputs.key }}
+        lookup-only: true
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: |
+          servers/build/lightning-rod
+          servers/build/world-import
+          servers/build/versions/lightning-rod
+        key: ${{ fromJSON(inputs.needs).build-lightning-rod.outputs.key }}
+        fail-on-cache-miss: true
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: servers/build/worlds/${{ inputs.terrain }}/vanilla
+        key: ${{ fromJSON(inputs.needs)[format('terrain-{0}', inputs.terrain)].outputs.key }}
+        fail-on-cache-miss: true
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: ./setup.sh import-${{ inputs.terrain }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: |
+          servers/build/worlds/${{ inputs.terrain }}/lightning-rod
+          servers/build/worlds/${{ inputs.terrain }}/lightning-rod.version
+        key: ${{ steps.key.outputs.key }}
