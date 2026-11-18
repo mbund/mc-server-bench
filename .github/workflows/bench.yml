@@ -218,7 +218,7 @@ jobs:
           target: import-real
           path: servers/build/worlds/real/lightning-rod*
           key: import-real-${{ needs.build-lightning-rod.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: terrain-real,build-lightning-rod
+          needs: "{terrain-real,build-lightning-rod}"
 
   import-flat:
     needs: [harness, terrain-flat, build-lightning-rod]
@@ -230,7 +230,7 @@ jobs:
           target: import-flat
           path: servers/build/worlds/flat/lightning-rod*
           key: import-flat-${{ needs.build-lightning-rod.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: terrain-flat,build-lightning-rod
+          needs: "{terrain-flat,build-lightning-rod}"
 
   import-wide:
     needs: [harness, terrain-wide, build-lightning-rod]
@@ -242,7 +242,7 @@ jobs:
           target: import-wide
           path: servers/build/worlds/wide/lightning-rod*
           key: import-wide-${{ needs.build-lightning-rod.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: terrain-wide,build-lightning-rod
+          needs: "{terrain-wide,build-lightning-rod}"
 
   steel-real:
     needs: [harness, build-steel]
@@ -254,7 +254,7 @@ jobs:
           target: steel-real
           path: servers/build/worlds/real/steel*
           key: steel-real-${{ needs.build-steel.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: harness,build-steel
+          needs: "{harness,build-steel}"
 
   steel-flat:
     needs: [harness, build-steel]
@@ -266,7 +266,7 @@ jobs:
           target: steel-flat
           path: servers/build/worlds/flat/steel*
           key: steel-flat-${{ needs.build-steel.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: harness,build-steel
+          needs: "{harness,build-steel}"
 
   steel-wide:
     needs: [harness, build-steel]
@@ -278,7 +278,7 @@ jobs:
           target: steel-wide
           path: servers/build/worlds/wide/steel*
           key: steel-wide-${{ needs.build-steel.outputs.key }}-${{ needs.harness.outputs.terrain }}
-          needs: harness,build-steel
+          needs: "{harness,build-steel}"
 
   # Every scenario on each of its terrains on a machine of its own, every server in turn, starting
   # once every server and that terrain's worlds are ready.

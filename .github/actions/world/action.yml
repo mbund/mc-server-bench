@@ -14,7 +14,7 @@ inputs:
     description: What the world depends on, its cache key.
     required: true
   needs:
-    description: The artifacts it is made from, as a list for a download pattern.
+    description: The artifacts it is made from, as a download pattern.
     required: true
   java:
     description: Whether making it runs vanilla, which needs Java.
@@ -34,7 +34,7 @@ runs:
         key: ${{ inputs.key }}
     - uses: actions/download-artifact@v8
       with:
-        pattern: "{${{ inputs.needs }}}"
+        pattern: ${{ inputs.needs }}
         merge-multiple: true
     - if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
