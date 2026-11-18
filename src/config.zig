@@ -24,9 +24,12 @@ pub const metrics = "metrics";
 /// it has no console to summon them through. Its plugin reads it once a second.
 pub const cows_file = "cows";
 
-/// Blocks between neighbouring cows in `cows`, so 8192 cover a field about 180 blocks across,
-/// inside the render and simulation distance of the player in its middle, 8 chunks either way.
-pub const cow_spacing = 2;
+/// Blocks between neighbouring cows in `cows`: a cow's width, so neighbours stand touching and
+/// every step one takes pushes another, which tests collisions as well as ticking and sending.
+/// 8192 then cover a field about 82 blocks across, every cow within 96 blocks of the player in
+/// its middle: inside the render and simulation distance, 8 chunks either way, and inside the 96
+/// blocks Paper sends animals out to by default, short of vanilla's.
+pub const cow_spacing = 0.9;
 
 /// Where cow `index` stands: on a square spiral out from the spot of the player, leaving that spot
 /// free, so any number of cows is a square field around the player and every step of a ramp adds
@@ -79,6 +82,11 @@ test "cows fill a square spiral around the player, every place once" {
         try seen.put(std.testing.allocator, cell, {});
         if (index == 7) for (0..3) |x| for (0..3) |z| try std.testing.expect(seen.contains(.{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(z)) - 1 }));
     }
-    const far = cowPosition(8191, .{ 8.3, 65, -3.7 });
-    try std.testing.expect(@abs(far[0] - 8.5) <= 92 and @abs(far[2] + 3.5) <= 92);
+    // Every cow of the largest field within 96 blocks of the player.
+    for (0..8192) |index| {
+        const at = cowPosition(index, .{ 8.3, 65, -3.7 });
+        const dx = at[0] - 8.3;
+        const dz = at[2] + 3.7;
+        try std.testing.expect(dx * dx + dz * dz <= 96 * 96);
+    }
 }

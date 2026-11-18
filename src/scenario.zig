@@ -58,7 +58,7 @@ pub const Kind = enum {
             .spread => "Everyone flies to a spot of their own, far enough apart that views never overlap, and hovers there.",
             .explore => "Everyone flies back and forth across the pregenerated world at 20 blocks a second, so servers load and send terrain from disk.",
             .build => "Everyone places or breaks a block every tick at a spot of their own near spawn.",
-            .cows => "One player stands at spawn while cows are summoned two blocks apart on a square spiral around them, more each step, all in view and ticking.",
+            .cows => "One player stands at spawn while cows are summoned touching on a square spiral around them, more each step, all in view and ticking.",
         };
     }
 };
