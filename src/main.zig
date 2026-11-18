@@ -10,6 +10,7 @@ const server_module = @import("server.zig");
 const process = @import("process.zig");
 const report = @import("report.zig");
 const config = @import("config.zig");
+const pregen_module = @import("pregen.zig");
 
 const Server = server_module.Server;
 const now = bot.now;
@@ -57,6 +58,13 @@ pub fn main(init: std.process.Init) !void {
     if (cpus < 2) return error.TooFewCpus;
     if (settings.server_cpus == null) settings.server_cpus = try std.fmt.allocPrint(allocator, "0-{d}", .{cpus / 2 - 1});
     if (settings.bot_cpus == null) settings.bot_cpus = try std.fmt.allocPrint(allocator, "{d}-{d}", .{ cpus / 2, cpus - 1 });
+    if (std.mem.eql(u8, verb, "recipe")) {
+        const kind = settings.server orelse return usage();
+        var buffer: [4096]u8 = undefined;
+        var stdout = std.Io.File.stdout().writer(init.io, &buffer);
+        try stdout.interface.writeAll(try pregen_module.recipe(allocator, kind, settings.terrain));
+        return stdout.interface.flush();
+    }
     if (std.mem.eql(u8, verb, "pregen")) {
         return pregen(allocator, init.io, try std.process.currentPathAlloc(init.io, allocator), settings);
     }
@@ -87,8 +95,10 @@ fn usage() error{InvalidArguments} {
         \\                                    measure one server in one scenario, a step for each count of players, or of cows
         \\                                    around one player, while it keeps up, adding a result for each to <out>/results.jsonl
         \\  bench report <directory> [--charts-url=<where the charts are published>]
+        \\  bench recipe --server=vanilla|steel [--terrain=flat|real|wide]
+        \\                                    print what decides the world pregen makes, which CI keys it on
         \\  bench pregen [--server=vanilla|steel] [--terrain=flat|real|wide] [--radius=<chunks>] [--dimension=<name>]
-        \\                                    generate the real terrain world with vanilla, or add a dimension to it
+        \\                                    generate a world runs start from, or add a dimension to it
         \\servers: vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion
         \\scenarios: idle wander spread explore build cows
         \\options: --warmup=<s> --seconds=<s> --server-cpus=<list> --bot-cpus=<list>
@@ -955,84 +965,16 @@ fn traffic(allocator: std.mem.Allocator, swarm: *bot.Swarm) !TrafficSummary {
     return summary;
 }
 
-/// Generates the real terrain world once with vanilla: a square of chunks around the centre,
-/// loaded a few hundred at a time until generation goes quiet, then saved. With a dimension, the
-/// square is added to that dimension of the existing world.
-/// Generates a world runs start from: the same square of chunks around the origin, forced loaded
-/// a few tiles at a time until generation quiets. Vanilla generates the world every server reading
-/// vanilla worlds starts from, and SteelMC, which reads none, the same chunks in its own.
+/// Generates a world runs start from with the server given, and reports its size.
 fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings) !void {
     const kind = settings.server orelse .vanilla;
-    if (kind != .vanilla and kind != .steel) return error.InvalidArguments;
-    if (kind == .steel and settings.dimension != null) return error.InvalidArguments;
-    const directory = try settings.terrain.directory(allocator, @tagName(kind));
-    if (settings.dimension == null) std.Io.Dir.cwd().deleteTree(io, directory) catch {};
-    const prefix = if (settings.dimension) |name| try std.fmt.allocPrint(allocator, "execute in {s} run ", .{name}) else "";
-    if (bot.probe(config.port)) return error.PortInUse;
-    const server = try Server.start(allocator, io, .{
+    const directory = try pregen_module.generate(allocator, io, root, .{
         .kind = kind,
-        .root = root,
-        .directory = directory,
-        .players = 1,
-        .cpus = settings.server_cpus.?,
-        .metrics = "",
         .terrain = settings.terrain,
-        .generating = true,
+        .radius = settings.radius,
+        .dimension = settings.dimension,
+        .cpus = settings.server_cpus.?,
     });
-    var stopped = false;
-    defer if (!stopped) {
-        _ = server.stop(60) catch {};
-    };
-    while (!bot.probe(config.port)) {
-        if (server.exited.load(.acquire)) return error.ServerExited;
-        try io.sleep(.fromMilliseconds(200), .awake);
-    }
-    // Forceload takes at most 256 chunks a command, so the square goes in tiles of 16 by 16.
-    const tiles = @divFloor((settings.radius orelse settings.terrain.radius()) + 15, 16);
-    // Tiles forced at once: each batch waits for generation to quiet, which the wide world would
-    // otherwise spend most of its time on.
-    const batch = 16;
-    // Each batch is released tile by tile, which every server's forceload takes.
-    var pending: [batch][2]i32 = undefined;
-    var pending_count: usize = 0;
-    var tile_x = -tiles;
-    while (tile_x < tiles) : (tile_x += 1) {
-        var tile_z = -tiles;
-        while (tile_z < tiles) : (tile_z += 1) {
-            const x = tile_x * 256;
-            const z = tile_z * 256;
-            try server.console(try std.fmt.allocPrint(allocator, "{s}forceload add {d} {d} {d} {d}", .{ prefix, x, z, x + 255, z + 255 }));
-            pending[pending_count] = .{ x, z };
-            pending_count += 1;
-            if (pending_count == batch or (tile_x == tiles - 1 and tile_z == tiles - 1)) {
-                try quiet(io, server);
-                for (pending[0..pending_count]) |tile| try server.console(try std.fmt.allocPrint(allocator, "{s}forceload remove {d} {d} {d} {d}", .{ prefix, tile[0], tile[1], tile[0] + 255, tile[1] + 255 }));
-                pending_count = 0;
-                std.log.info("generated through tile {d}, {d}", .{ tile_x, tile_z });
-            }
-        }
-    }
-    // SteelMC saves when it stops and has no save command.
-    if (kind == .vanilla) try server.console("save-all flush");
-    try quiet(io, server);
-    const ending = try server.stop(600);
-    stopped = true;
-    if (!ending.clean) return error.ServerKilled;
     const world = try std.fs.path.join(allocator, &.{ directory, kind.worldPaths()[0] });
     std.log.info("world of {d:.0} MB in {s}", .{ megabytes(try diskUsage(allocator, io, world)), world });
-}
-
-/// Waits until the server keeps under half a core for three seconds running.
-fn quiet(io: std.Io, server: *Server) !void {
-    var calm: usize = 0;
-    var previous = try process.sample(server.pid);
-    for (0..1800) |_| {
-        try io.sleep(.fromSeconds(1), .awake);
-        if (server.exited.load(.acquire)) return error.ServerExited;
-        const now_usage = try process.sample(server.pid);
-        calm = if (now_usage.cpu_ns - previous.cpu_ns < std.time.ns_per_s / 2) calm + 1 else 0;
-        previous = now_usage;
-        if (calm == 3) return;
-    }
-    return error.GenerationNeverSettled;
 }
