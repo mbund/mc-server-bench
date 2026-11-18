@@ -612,6 +612,9 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     window.ping_p50_ms = percentile(&pings, window.pings, 0.50);
     window.ping_p99_ms = percentile(&pings, window.pings, 0.99);
     if (window.tps == 0) try problems.append(allocator, "no world time reached the bots, so ticks per second is unknown");
+    // Vanilla answers a ping as its network thread reads it, so one that answers none leaves the
+    // latency unmeasured, and the ping limit unable to end its ramp.
+    if (window.pings == 0) try problems.append(allocator, "no ping was answered, so latency is unknown");
 
     result.view_s = try medianGap(allocator, swarm, .spawned_ns, .viewed_ns);
     result.first_chunk_s = seconds(earliest(swarm, .first_chunk_ns) -| launched);

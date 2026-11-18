@@ -521,8 +521,8 @@ pub const Bot = struct {
         try self.queue(packet.bytes());
     }
 
-    /// A ping request the server answers as it handles the bot's packets, once a second, which
-    /// times how long the server takes to respond.
+    /// A ping request, once a second, which vanilla answers as its network thread reads it rather
+    /// than in a tick, so it times how quickly the server's network side responds.
     pub fn ping(self: *Bot) !void {
         if ((self.ticks + self.index) % 20 != 0) return;
         var buffer: [16]u8 = undefined;
