@@ -20,7 +20,8 @@ pub const measures = [_]Measure{
     .{ .title = "Mean tick time (mspt)", .unit = "ms", .path = &.{ "window", "mspt", "mean_ms" }, .reported = true },
     .{ .title = "Received per player", .unit = "KB/s", .path = &.{ "window", "received_kb_per_s_per_player" } },
     .{ .title = "Peak memory", .unit = "MB", .path = &.{"peak_rss_mb"} },
-    .{ .title = "Ping round trip p99", .unit = "ms", .path = &.{ "window", "ping_p99_ms" } },
+    .{ .title = "Network round trip p99", .unit = "ms", .path = &.{ "window", "ping_p99_ms" } },
+    .{ .title = "Block edit acknowledged p99", .unit = "ms", .path = &.{ "window", "edit_p99_ms" } },
 };
 
 /// One server's values in a panel, one per player count, null where it has no result or a value

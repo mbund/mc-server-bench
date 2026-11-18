@@ -210,10 +210,15 @@ pub const Window = struct {
     chunks_per_s: f64 = 0,
     disk_read_mb: f64 = 0,
     disk_write_mb: f64 = 0,
-    /// Round trips of the pings players sent in the window, and how many came back.
+    /// Network round trips: of the pings players sent in the window, and how many came back.
     ping_p50_ms: f64 = 0,
     ping_p99_ms: f64 = 0,
     pings: u64 = 0,
+    /// Round trips of the block edits players made in the window, until the server acknowledged
+    /// them in a tick, and how many it did.
+    edit_p50_ms: f64 = 0,
+    edit_p99_ms: f64 = 0,
+    edits: u64 = 0,
     /// The share of the bots' own CPUs they kept busy.
     bot_cpu: f64 = 0,
 };
@@ -391,7 +396,8 @@ const Run = struct {
 const limits = struct {
     /// The server falling behind, from the world time the bots receive.
     const tps = 19.0;
-    /// The server answering a player's ping late, which it does as it handles their packets.
+    /// The server's network side answering a player's ping late, as vanilla answers from its
+    /// network thread: its output is that far behind, or the thread stalled.
     const ping_p99_ms = 200.0;
     /// The bots' own CPUs this busy, when the bots rather than the server set the limit.
     const bot_cpu = 0.95;
@@ -477,7 +483,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
             base.first_chunk_s = result.first_chunk_s;
             base.full_view_s = result.full_view_s;
         }
-        std.log.info("  {d:.2} cpu ms/tick, {d:.1} tps, {d:.2} mspt, ping p99 {d:.1} ms, {d:.0} MB, {d:.1} KB/s per player, {d} problems{s}{s}", .{
+        std.log.info("  {d:.2} cpu ms/tick, {d:.1} tps, {d:.2} mspt, round trip p99 {d:.1} ms, {d:.0} MB, {d:.1} KB/s per player, {d} problems{s}{s}", .{
             result.window.cpu_ms_per_tick, result.window.tps,                          result.window.mspt.mean_ms, result.window.ping_p99_ms,
             result.window.rss_mb_max,      result.window.received_kb_per_s_per_player, result.problems.len,        if (result.limit.len != 0) ", stopping: " else "",
             result.limit,
@@ -568,7 +574,8 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     const first_sent = swarm.total(.bytes_out);
     const first_chunks = swarm.total(.chunks);
     const first_corrections = swarm.total(.corrections);
-    const first_latency = swarm.latency();
+    const first_latency = swarm.latency(.ping);
+    const first_edits = swarm.latency(.edit);
     run.last_query_ns = now();
     _ = try run.wait(settings.measure_s, null);
     try server.queryTicks();
@@ -578,7 +585,8 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     const last_bots = try process.sample(linux.getpid());
     const last_threads = try threadTimes(allocator, io, server.pid);
     const last_time, const last_time_ns = swarm.gameTime();
-    const last_latency = swarm.latency();
+    const last_latency = swarm.latency(.ping);
+    const last_edits = swarm.latency(.edit);
     // Give the last tick report a moment to arrive.
     try io.sleep(.fromMilliseconds(500), .awake);
 
@@ -611,10 +619,17 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     for (pings) |count| window.pings += count;
     window.ping_p50_ms = percentile(&pings, window.pings, 0.50);
     window.ping_p99_ms = percentile(&pings, window.pings, 0.99);
+    var edits: [bot.Latency.buckets]u64 = undefined;
+    for (&edits, first_edits, last_edits) |*count, before, after| count.* = after - before;
+    window.edits = 0;
+    for (edits) |count| window.edits += count;
+    window.edit_p50_ms = percentile(&edits, window.edits, 0.50);
+    window.edit_p99_ms = percentile(&edits, window.edits, 0.99);
     if (window.tps == 0) try problems.append(allocator, "no world time reached the bots, so ticks per second is unknown");
     // Vanilla answers a ping as its network thread reads it, so one that answers none leaves the
     // latency unmeasured, and the ping limit unable to end its ramp.
-    if (window.pings == 0) try problems.append(allocator, "no ping was answered, so latency is unknown");
+    if (window.pings == 0) try problems.append(allocator, "no ping was answered, so the network round trip is unknown");
+    if (scenario_kind == .build and window.edits == 0) try problems.append(allocator, "no block edit was acknowledged, so its round trip is unknown");
 
     result.view_s = try medianGap(allocator, swarm, .spawned_ns, .viewed_ns);
     result.first_chunk_s = seconds(earliest(swarm, .first_chunk_ns) -| launched);
@@ -637,7 +652,7 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     else if (window.tps < limits.tps)
         try std.fmt.allocPrint(allocator, "{d:.1} TPS", .{window.tps})
     else if (window.pings != 0 and window.ping_p99_ms > limits.ping_p99_ms)
-        try std.fmt.allocPrint(allocator, "ping p99 {d:.0} ms", .{window.ping_p99_ms})
+        try std.fmt.allocPrint(allocator, "network round trip p99 {d:.0} ms", .{window.ping_p99_ms})
     else if (cows_missing != 0)
         try std.fmt.allocPrint(allocator, "the player never got {d} cows", .{cows_missing})
     else if (viewless != 0)

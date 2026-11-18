@@ -124,6 +124,8 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
             }
             if (any) try series.append(allocator, .{ .server = server, .values = values });
         }
+        // A measure no server has here, like edit round trips where nobody edits, takes no panel.
+        if (series.items.len == 0) continue;
         try panels.append(allocator, .{ .measure = measure, .series = series.items });
     }
     const name = try std.fmt.allocPrint(allocator, "{s}-{s}.svg", .{ @tagName(terrain), @tagName(kind) });
@@ -270,8 +272,8 @@ fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Te
     try writer.print("<details><summary>{d} {s}</summary>\n\n", .{ players, if (players == 1) kind.counted()[0 .. kind.counted().len - 1] else kind.counted() });
     defer writer.writeAll("</details>\n\n") catch {};
     try writer.writeAll(
-        \\| Server | Total KB | KB/s | KB/chunk | Chunks | CPU ms/tick | mspt mean | mspt p99 | TPS | Ping p99 ms | Peak RAM MB | Disk MB | World MB | Problems |
-        \\|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+        \\| Server | Total KB | KB/s | KB/chunk | Chunks | CPU ms/tick | mspt mean | mspt p99 | TPS | Round trip p99 ms | Edit ack p99 ms | Peak RAM MB | Disk MB | World MB | Problems |
+        \\|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
         \\
     );
     var problems: usize = 0;
@@ -296,6 +298,7 @@ fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Te
         } else try writer.writeAll("n/a | n/a | ");
         try writer.print("{d:.1} | ", .{number(run, &.{ "window", "tps" })});
         if (number(run, &.{ "window", "pings" }) > 0) try writer.print("{d:.1} | ", .{number(run, &.{ "window", "ping_p99_ms" })}) else try writer.writeAll("n/a | ");
+        if (number(run, &.{ "window", "edits" }) > 0) try writer.print("{d:.1} | ", .{number(run, &.{ "window", "edit_p99_ms" })}) else try writer.writeAll("n/a | ");
         try writer.print("{d:.0} | {d:.1} | {d:.1} | {d} |\n", .{
             number(run, &.{"peak_rss_mb"}),
             number(run, &.{ "window", "disk_write_mb" }),

@@ -59,8 +59,12 @@ pub const Counter = enum {
     arrived_ns,
 };
 
-/// Round trips of pings, in buckets a quarter of a power of two wide in microseconds, so any
-/// percentile is within about 12% at every scale. Bots record into their own and the swarm adds
+/// Edits a bot times at once: one a tick, so the server may take three seconds to acknowledge one
+/// before it goes untimed.
+const edit_window = 64;
+
+/// Round trips, of pings or of edits, in buckets a quarter of a power of two wide in microseconds,
+/// so any percentile is within about 12% at every scale. Bots record into their own and the swarm adds
 /// them up.
 pub const Latency = struct {
     pub const buckets = 104;
@@ -162,7 +166,15 @@ pub const Bot = struct {
     reason: [160]u8 = undefined,
     reason_len: u8 = 0,
     counters: Counters = .{},
+    /// Round trips of pings, which vanilla answers from its network thread.
     latency: Latency = .{},
+    /// Round trips of block edits, from sending one until the server acknowledged its sequence,
+    /// which vanilla does in the player's tick after handling it.
+    edit_latency: Latency = .{},
+    /// When each of the latest edits was sent, by its sequence.
+    edit_sent_ns: [edit_window]u64 = undefined,
+    /// The highest edit sequence timed so far.
+    edit_timed: i32 = 0,
     /// When the bot may start joining, once the swarm admits it.
     due_ns: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
     /// What the server sent before play, and in play by packet id: as it crossed the wire,
@@ -467,6 +479,16 @@ pub const Bot = struct {
             self.counters.add(.acks, 1);
             const sequence: u64 = @intCast(@max(0, try reader.varint()));
             if (sequence > self.counters.get(.acked_sequence)) self.counters.set(.acked_sequence, sequence);
+            // An acknowledgement covers every edit up to its sequence. Edits older than the
+            // window are not timed, as their send times were overwritten.
+            const acked: i32 = @intCast(@min(sequence, @as(u64, @intCast(self.sequence))));
+            const moment = now();
+            while (self.edit_timed < acked) {
+                self.edit_timed += 1;
+                if (acked - self.edit_timed >= edit_window) continue;
+                const sent = self.edit_sent_ns[@intCast(@mod(self.edit_timed, edit_window))];
+                if (moment > sent) self.edit_latency.record((moment - sent) / std.time.ns_per_us);
+            }
         } else if (id == In.packetId(.block_change) or id == In.packetId(.multi_block_change)) {
             self.counters.add(.block_changes, 1);
         } else if (id == In.packetId(.start_configuration)) {
@@ -565,6 +587,7 @@ pub const Bot = struct {
     /// Places the held block on the top face of the block at `below`.
     pub fn place(self: *Bot, below: [3]i32) !void {
         self.sequence += 1;
+        self.edit_sent_ns[@intCast(@mod(self.sequence, edit_window))] = now();
         var buffer: [64]u8 = undefined;
         var packet: Packet = .init(&buffer, Protocol.play.toServer.packetId(.block_place));
         packet.varint(0);
@@ -583,6 +606,7 @@ pub const Bot = struct {
     /// Breaks the block at `at`, which a creative player does at the first hit.
     pub fn dig(self: *Bot, at: [3]i32) !void {
         self.sequence += 1;
+        self.edit_sent_ns[@intCast(@mod(self.sequence, edit_window))] = now();
         var buffer: [32]u8 = undefined;
         var packet: Packet = .init(&buffer, Protocol.play.toServer.packetId(.block_dig));
         packet.varint(0);
@@ -738,12 +762,16 @@ pub const Swarm = struct {
         return self.bots[0..self.admitted];
     }
 
-    /// Every bot's ping round trips added up.
-    pub fn latency(self: *const Swarm) [Latency.buckets]u64 {
+    /// Every bot's round trips of one kind added up.
+    pub fn latency(self: *const Swarm, comptime kind: enum { ping, edit }) [Latency.buckets]u64 {
         var sum: [Latency.buckets]u64 = @splat(0);
-        for (self.bots) |*each| for (&sum, &each.latency.counts) |*summed, *value| {
-            summed.* += value.load(.monotonic);
-        };
+        for (self.bots) |*each| {
+            const counts = switch (kind) {
+                .ping => &each.latency.counts,
+                .edit => &each.edit_latency.counts,
+            };
+            for (&sum, counts) |*summed, *value| summed.* += value.load(.monotonic);
+        }
         return sum;
     }
 
