@@ -61,7 +61,6 @@ pub fn main(init: std.process.Init) !void {
             .max_players = max_players,
             .codec_workers = 4,
             .input_burst_slots = 2,
-            .output_burst_slots = 8,
             .decode_slots = 2,
             .endpoints = &.{.{ .id = 0, .connections = max_players }},
             // Vanilla's default threshold.
