@@ -34,6 +34,8 @@ pub const Settings = struct {
     out: []const u8 = "runs/latest",
     keep_worlds: bool = false,
     dump_frames: ?[]const u8 = null,
+    /// The port of a server `bots` joins, already running on this machine.
+    port: u16 = config.port,
     /// Chunks out from the centre that `pregen` generates.
     /// The terrain's own unless given.
     radius: ?i32 = null,
@@ -65,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
         try stdout.interface.writeAll(try pregen_module.recipe(allocator, kind, settings.terrain));
         return stdout.interface.flush();
     }
+    if (std.mem.eql(u8, verb, "bots")) return bots(allocator, init.io, settings);
     if (std.mem.eql(u8, verb, "pregen")) {
         return pregen(allocator, init.io, try std.process.currentPathAlloc(init.io, allocator), settings);
     }
@@ -94,6 +97,9 @@ fn usage() error{InvalidArguments} {
         \\  bench run --server=<name> --scenario=<name> [--terrain=flat|real|wide] [--players=<count>,...] [--cows=<count>,...] [options]
         \\                                    measure one server in one scenario, a step for each count of players, or of cows
         \\                                    around one player, while it keeps up, adding a result for each to <out>/results.jsonl
+        \\  bench bots --scenario=<name> --players=<count> [--port=<port>]
+        \\                                    join bots to a server already running on this machine and keep them
+        \\                                    playing, to watch them from a client, until stopped
         \\  bench report <directory> [--charts-url=<where the charts are published>]
         \\  bench recipe --server=vanilla|steel [--terrain=flat|real|wide]
         \\                                    print what decides the world pregen makes, which CI keys it on
@@ -148,6 +154,8 @@ fn parseOption(settings: *Settings, argument: []const u8) !void {
         settings.dimension = value;
     } else if (std.mem.eql(u8, name, "--dump-frames")) {
         settings.dump_frames = value;
+    } else if (std.mem.eql(u8, name, "--port")) {
+        settings.port = try std.fmt.parseInt(u16, value, 10);
     } else if (std.mem.eql(u8, name, "--keep-worlds")) {
         settings.keep_worlds = true;
     } else {
@@ -981,6 +989,39 @@ fn traffic(allocator: std.mem.Allocator, swarm: *bot.Swarm) !TrafficSummary {
     }.heavier);
     summary.packets = packets.items;
     return summary;
+}
+
+/// Joins bots to a server already running on this machine, as a run would, and keeps them playing
+/// their scenario until stopped, saying every five seconds how they fare and why any left, so
+/// someone logged in beside them can watch them play.
+fn bots(allocator: std.mem.Allocator, io: std.Io, settings: Settings) !void {
+    const kind = settings.scenario orelse return usage();
+    if (settings.players.len != 1 or settings.players[0] == 0) return usage();
+    const players = settings.players[0];
+    if (!bot.probe(settings.port)) {
+        std.log.err("nothing is listening on port {d}", .{settings.port});
+        return error.NothingListening;
+    }
+    const swarm = try bot.Swarm.init(allocator, .{ .port = settings.port, .kind = kind, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms }, players, settings.bot_threads);
+    try swarm.start();
+    defer swarm.stop();
+    swarm.admit(players);
+    std.log.info("{d} bots joining port {d} to {s}: {s}", .{ players, settings.port, @tagName(kind), kind.description() });
+    const reported = try allocator.alloc(bool, players);
+    @memset(reported, false);
+    while (true) {
+        try io.sleep(.fromSeconds(5), .awake);
+        for (swarm.bots, reported) |*each, *told| {
+            if (told.* or each.phase.load(.acquire) != .failed) continue;
+            told.* = true;
+            std.log.warn("{s} left: {s}", .{ each.label(), each.reasonText() });
+        }
+        std.log.info("{d} of {d} spawned, {d} with a full view, {d} left, {d} chunks, moved back {d} times", .{
+            swarm.reached(.spawned_ns), players,              swarm.reached(.viewed_ns), swarm.count(.failed),
+            swarm.total(.chunks),       swarm.total(.corrections),
+        });
+        if (swarm.count(.failed) == players) return error.EveryBotLeft;
+    }
 }
 
 /// Generates a world runs start from with the server given, and reports its size.
