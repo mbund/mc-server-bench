@@ -210,8 +210,10 @@ pub const Server = struct {
         const argv = try command(allocator, options);
         const log = try std.Io.Dir.cwd().createFile(io, try std.fs.path.join(allocator, &.{ options.directory, "server.log" }), .{});
         // A shell joins stderr to stdout, then execs, so the process measured is the server itself.
+        // The server dies with the bench, even one that crashed, so none outlives it holding the
+        // port the next run needs.
         var full: std.ArrayList([]const u8) = .empty;
-        try full.appendSlice(allocator, &.{ "sh", "-c", "exec taskset -c \"$0\" \"$@\" 2>&1", options.cpus });
+        try full.appendSlice(allocator, &.{ "sh", "-c", "exec setpriv --pdeathsig KILL taskset -c \"$0\" \"$@\" 2>&1", options.cpus });
         try full.appendSlice(allocator, argv);
         const child = try std.process.spawn(io, .{
             .argv = full.items,
