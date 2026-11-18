@@ -80,9 +80,19 @@ jobs:
             ~/.cache/zig
           key: zig-${{ steps.key.outputs.key }}
           restore-keys: zig-lightning-rod-
+      # Gradle's downloads for the snapshotter that extracts every release's registries, as Maven
+      # Central turns away runners that fetch them all anew too often.
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ steps.key.outputs.key }}
+          restore-keys: gradle-lightning-rod-
       - if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          ./setup.sh lightning-rod
+          # Once more after a pause if Maven Central turned it away, keeping what was extracted.
+          ./setup.sh lightning-rod || { sleep 120; ./setup.sh lightning-rod; }
           tar -czf build-lightning-rod.tar.gz servers/build/lightning-rod servers/build/world-import servers/build/versions/lightning-rod
       - uses: actions/upload-artifact@v7
         with:
