@@ -541,6 +541,7 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     result.cows = cows;
     var problems: std.ArrayList([]const u8) = .empty;
     const newcomers = players - swarm.admitted;
+    const opening = swarm.admitted == 0;
     const admitted_at = now();
     swarm.admit(players);
 
@@ -568,7 +569,9 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
         result.travel_s = seconds(now() - travel_start);
     }
     run.phase = "warmup";
-    _ = try run.wait(settings.warmup_s, null);
+    // The first step also waits out a server warming up after its start, as a JVM compiling its
+    // hot code, so its first count costs what that count does rather than the start.
+    _ = try run.wait(settings.warmup_s + if (opening) first_warmup_s else 0, null);
 
     run.phase = "measure";
     try run.sample();
@@ -1023,6 +1026,9 @@ fn bots(allocator: std.mem.Allocator, io: std.Io, settings: Settings) !void {
         if (swarm.count(.failed) == players) return error.EveryBotLeft;
     }
 }
+
+/// Seconds the first step of a run settles beyond the others.
+const first_warmup_s: u64 = 30;
 
 /// Generates a world runs start from with the server given, and reports its size.
 fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings) !void {
