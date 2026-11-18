@@ -14,8 +14,8 @@ pub const view_distance = config.view_distance;
 const flight_speed = 1.0;
 const walk_speed = 0.215;
 const travel_speed = 0.5;
-/// The height flying bots climb to before moving across, above every peak vanilla generates,
-/// so no terrain is in their way.
+/// The height flying bots fly at, above every peak vanilla generates, so no terrain is in their
+/// way.
 const cruise_altitude = 300;
 /// Blocks between neighbouring spots in `spread`: wider than a view, so views do not overlap.
 const spread_spacing = 2 * (view_distance + 1) * 16;
@@ -54,9 +54,9 @@ pub const Kind = enum {
 
     pub fn description(kind: Kind) []const u8 {
         return switch (kind) {
-            .idle => "Everyone flies up above spawn to a spot of their own, two blocks from the next, and hovers there.",
-            .wander => "Everyone flies up above spawn to a spot of their own, then at walking speed at random within 24 blocks of spawn, in sight of each other.",
-            .spread => "Everyone flies to a spot of their own, far enough apart that views never overlap, and hovers there.",
+            .idle => "Everyone is moved to a spot of their own above spawn, two blocks from the next, and hovers there.",
+            .wander => "Everyone is moved to a spot of their own above spawn, then flies at walking speed at random within 24 blocks of spawn, in sight of each other.",
+            .spread => "Everyone is moved to a spot of their own, far enough apart that views never overlap, and hovers there.",
             .explore => "Everyone flies back and forth across the pregenerated world at 20 blocks a second, so servers load and send terrain from disk.",
             .build => "Everyone places or breaks a block every tick at a spot of their own near spawn.",
             .cows => "One player stands at spawn while cows are summoned touching on a square spiral around them, more each step, all in view and ticking.",
@@ -91,6 +91,30 @@ test "a full view is the chunks vanilla tracks" {
     if (view_distance == 8) try std.testing.expectEqual(@as(u64, 257), viewChunks());
 }
 
+/// Where the server moves a bot as it joins, as /tp does, and where the bot starts the scenario,
+/// or null where it starts where it spawned. Moving it there takes a tick, where flying there
+/// above the terrain took minutes a step and measured nothing.
+pub fn startSpot(configuration: bot_module.Configuration, bot: *const Bot, count: usize) ?[3]f64 {
+    return switch (configuration.kind) {
+        .idle, .wander => spot(bot),
+        .spread => spreadSpot(bot, configuration.terrain),
+        .explore => .{ bot.home()[0], cruise_altitude, bot.home()[2] },
+        .build => buildTarget(bot, count),
+        .cows => null,
+    };
+}
+
+/// Whether the bot is at its start, holding still until the server moved it there. The last
+/// fraction of a block the move rounds away it covers itself, which marks it arrived.
+fn arrive(bot: *Bot, target: [3]f64, flying: bool) !bool {
+    if (!bot.placed) {
+        try still(bot);
+        return false;
+    }
+    if (flying) try bot.fly();
+    return travel(bot, target, travel_speed);
+}
+
 pub fn step(configuration: bot_module.Configuration, bot: *Bot, count: usize) !void {
     switch (configuration.kind) {
         .idle => try idle(bot),
@@ -116,14 +140,12 @@ fn spot(bot: *const Bot) [3]f64 {
 }
 
 fn idle(bot: *Bot) !void {
-    if (!try rise(bot)) return;
-    if (try travel(bot, spot(bot), travel_speed)) try still(bot);
+    if (try arrive(bot, spot(bot), true)) try still(bot);
 }
 
 fn wander(bot: *Bot) !void {
-    if (!try rise(bot)) return;
     if (bot.counters.get(.arrived_ns) == 0) {
-        _ = try travel(bot, spot(bot), travel_speed);
+        _ = try arrive(bot, spot(bot), true);
         return;
     }
     const random = bot.random.random();
@@ -155,10 +177,13 @@ pub fn tiledTarget(bot: *const Bot) [3]f64 {
     return at;
 }
 
+/// The bot's own spot in `spread`, where the server moves it as it joins.
+pub fn spreadSpot(bot: *const Bot, terrain: @import("server.zig").Terrain) [3]f64 {
+    return if (terrain == .tiled) tiledTarget(bot) else spreadTarget(bot);
+}
+
 fn spread(bot: *Bot, terrain: @import("server.zig").Terrain) !void {
-    if (!try rise(bot)) return;
-    const target = if (terrain == .tiled) tiledTarget(bot) else spreadTarget(bot);
-    if (try travel(bot, target, flight_speed)) {
+    if (try arrive(bot, spreadSpot(bot, terrain), true)) {
         // Hovering in place, as a still client does.
         if ((bot.ticks + bot.index) % 20 == 0) try bot.move(false);
     }
@@ -171,7 +196,10 @@ const explore_reach: f64 = @floatFromInt((@import("server.zig").Terrain.flat.rad
 /// Back and forth along a line of its own through spawn, turning where its view would leave the
 /// pregenerated world, so every chunk it reaches is on disk and none is generated.
 fn explore(bot: *Bot) !void {
-    if (!try rise(bot)) return;
+    if (bot.counters.get(.arrived_ns) == 0) {
+        _ = try arrive(bot, .{ bot.home()[0], cruise_altitude, bot.home()[2] }, true);
+        return;
+    }
     // The heading is 0 flying out along the bot's line and pi flying back.
     var angle = @as(f64, @floatFromInt(bot.index + 1)) * golden_angle + bot.heading;
     const dx = bot.position[0] - bot.home()[0];
@@ -202,7 +230,7 @@ pub fn buildTarget(bot: *const Bot, count: usize) [3]f64 {
 
 fn build(bot: *Bot, count: usize) !void {
     const target = buildTarget(bot, count);
-    if (!try travel(bot, target, travel_speed)) return;
+    if (!try arrive(bot, target, false)) return;
     try bot.stock(bot_module.item_stone);
     // The block east of the bot, standing on the ground it stands on.
     const at: [3]i32 = .{ @as(i32, @intFromFloat(@floor(target[0]))) + 1, @intFromFloat(@floor(target[1])), @intFromFloat(@floor(target[2])) };
@@ -238,14 +266,4 @@ fn travel(bot: *Bot, target: [3]f64, speed: f64) !bool {
 /// Minecraft's yaw for a heading in the horizontal plane: zero faces +z, ninety faces -x.
 fn yawOf(heading: f64) f32 {
     return @floatCast(std.math.radiansToDegrees(heading) - 90);
-}
-
-/// Starts flight and climbs straight up to the cruise altitude, reporting whether the bot is
-/// there.
-fn rise(bot: *Bot) !bool {
-    try bot.fly();
-    if (bot.position[1] >= cruise_altitude) return true;
-    bot.position[1] = @min(cruise_altitude, bot.position[1] + flight_speed);
-    try bot.move(false);
-    return false;
 }

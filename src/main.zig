@@ -403,6 +403,17 @@ const Run = struct {
         return self.swarm.reached(.spawned_ns) + self.swarm.count(.failed) == self.swarm.admitted;
     }
 
+    /// Whether the server handled every bot's first action, sent after it confirmed where it
+    /// joined, so the server is no longer waiting on that confirmation, which Pumpkin kicks a
+    /// player for confirming after another move.
+    fn settled(self: *Run) bool {
+        var count: usize = 0;
+        for (self.swarm.bots[0..self.swarm.admitted]) |*each| {
+            if (each.counters.get(.acked_sequence) > 0 or each.phase.load(.acquire) == .failed) count += 1;
+        }
+        return count == self.swarm.admitted;
+    }
+
     fn viewed(self: *Run) bool {
         return self.swarm.reached(.viewed_ns) + self.swarm.count(.failed) == self.swarm.admitted;
     }
@@ -580,6 +591,15 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
             cows_missing = cows -| swarm.total(.cows_seen);
             try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ swarm.total(.cows_seen), cows }));
         }
+    }
+    // The server moves each new player to where its scenario starts, as flying there would take
+    // minutes a step and measure nothing.
+    if (scenario_kind != .cows and !try run.wait(60, Run.settled)) try problems.append(allocator, "not every bot had its first action handled in time");
+    for (swarm.bots[players - newcomers .. players]) |*each| {
+        // Joined, so it knows the spawn its spot is laid out from, as the bot does.
+        if (each.counters.get(.spawned_ns) == 0) continue;
+        const spot = scenario.startSpot(swarm.config, each, swarm.bots.len) orelse continue;
+        try server.teleport(allocator, each.label(), spot);
     }
     if (scenario_kind.travels()) {
         run.phase = "travel";

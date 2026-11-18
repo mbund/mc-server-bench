@@ -41,6 +41,7 @@ pub fn main(init: std.process.Init) !void {
             lightning_rod.plugin.configured(vanilla.Mobs, vanilla.Mobs.Configuration{ .maximum = @max(1024, cows) }),
         }),
         lightning_rod.plugin.configured(Cows, Cows.Configuration{}),
+        lightning_rod.plugin.configured(Teleports, Teleports.Configuration{}),
     });
     var protocols = try protocol_set.Default.init(allocator);
     defer protocols.deinit(allocator);
@@ -74,6 +75,56 @@ pub fn main(init: std.process.Init) !void {
         .storage_path = config.world,
     }, .{});
 }
+
+/// Moves players where the bench asks, as /tp does on the servers with a console: each line of
+/// the teleports file in the server's directory, a name and where, once its player is in its
+/// world, read a few times a second.
+const Teleports = struct {
+    pub const id = "mc_server_bench:teleports";
+    pub const Configuration = struct {};
+    pub const Dependencies = struct { players: *Players };
+
+    deps: Dependencies,
+    ticks: u64 = 0,
+    /// Lines already carried out.
+    done: usize = 0,
+    buffer: [64 * 1024]u8 = undefined,
+
+    pub fn init(allocator: std.mem.Allocator, _: Configuration, deps: Dependencies) !*Teleports {
+        const self = try allocator.create(Teleports);
+        self.* = .{ .deps = deps };
+        return self;
+    }
+
+    pub fn tick(self: *Teleports, io: std.Io) !void {
+        self.ticks += 1;
+        if (self.ticks % 5 != 0) return;
+        const text = std.Io.Dir.cwd().readFile(io, config.teleports_file, &self.buffer) catch return;
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        var index: usize = 0;
+        while (lines.next()) |line| : (index += 1) {
+            // Only whole lines, which end before the text does.
+            if (lines.peek() == null) break;
+            if (index < self.done) continue;
+            var fields = std.mem.tokenizeScalar(u8, line, ' ');
+            const name = fields.next() orelse return error.InvalidTeleport;
+            var at: [3]f64 = undefined;
+            for (&at) |*axis| axis.* = try std.fmt.parseFloat(f64, fields.next() orelse return error.InvalidTeleport);
+            const player = self.find(name) orelse return;
+            if (!player.inWorld()) return;
+            try self.deps.players.teleport(player, player.world, .{ .x = at[0], .y = at[1], .z = at[2] }, player.rotation);
+            self.done = index + 1;
+        }
+    }
+
+    fn find(self: *Teleports, name: []const u8) ?*@TypeOf(self.deps.players.records[0]) {
+        for (self.deps.players.activeSlots()) |slot| {
+            const player = &self.deps.players.records[slot];
+            if (std.mem.eql(u8, player.name[0..player.name_len], name)) return player;
+        }
+        return null;
+    }
+};
 
 /// Spawns the cows scenario's herd, the same cows the bench summons on servers with a console: as
 /// many as the cows file in the server's directory says, read once a second, around the first

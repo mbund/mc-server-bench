@@ -118,12 +118,13 @@ pub const Counters = struct {
     }
 
     pub fn get(self: *const Counters, counter: Counter) u64 {
-        return self.values[@intFromEnum(counter)].load(.monotonic);
+        return self.values[@intFromEnum(counter)].load(.acquire);
     }
 
-    /// Sets a moment once, so the first time something happened stays.
+    /// Sets a moment once, so the first time something happened stays. What the bot learned
+    /// before it is seen by whoever reads the moment.
     pub fn mark(self: *Counters, counter: Counter, value: u64) void {
-        _ = self.values[@intFromEnum(counter)].cmpxchgStrong(0, @max(1, value), .monotonic, .monotonic);
+        _ = self.values[@intFromEnum(counter)].cmpxchgStrong(0, @max(1, value), .release, .monotonic);
     }
 };
 
@@ -170,6 +171,8 @@ pub const Bot = struct {
     frame_total: usize = 0,
     entity: i32 = 0,
     spawned: bool = false,
+    /// Moved by the server to where its scenario starts.
+    placed: bool = false,
     position: [3]f64 = @splat(0),
     yaw: f32 = 0,
     pitch: f32 = 0,
@@ -431,7 +434,7 @@ pub const Bot = struct {
         switch (self.phase.load(.monotonic)) {
             .login => try self.loginPacket(worker, id, &reader),
             .configuration => try self.configurationPacket(id, &reader),
-            .play => try self.playPacket(id, &reader, raw.len),
+            .play => try self.playPacket(worker, id, &reader, raw.len),
             .waiting, .failed => unreachable,
         }
     }
@@ -545,7 +548,7 @@ pub const Bot = struct {
         }
     }
 
-    fn playPacket(self: *Bot, id: i32, reader: *Reader, frame_bytes: usize) !void {
+    fn playPacket(self: *Bot, worker: *Worker, id: i32, reader: *Reader, frame_bytes: usize) !void {
         const In = Protocol.play.toClient;
         const Out = Protocol.play.toServer;
         var buffer: [256]u8 = undefined;
@@ -587,8 +590,9 @@ pub const Bot = struct {
                 @floatFromInt(@as(i64, at << 52) >> 52),
                 @as(f64, @floatFromInt(@as(i64, at << 26) >> 38)) + 0.5,
             };
+            self.markJoined();
         } else if (id == In.packetId(.position)) {
-            try self.teleported(reader);
+            try self.teleported(worker, reader);
         } else if (id == In.packetId(.spawn_entity)) {
             _ = try reader.varint();
             _ = try reader.take(16);
@@ -622,7 +626,7 @@ pub const Bot = struct {
         }
     }
 
-    fn teleported(self: *Bot, reader: *Reader) !void {
+    fn teleported(self: *Bot, worker: *Worker, reader: *Reader) !void {
         const Out = Protocol.play.toServer;
         const teleport = try reader.varint();
         var target: [3]f64 = undefined;
@@ -639,16 +643,31 @@ pub const Bot = struct {
         var packet: Packet = .init(&buffer, Out.packetId(.teleport_confirm));
         packet.varint(teleport);
         try self.queue(packet.bytes());
-        if (self.spawned) {
+        // The bench has the server move each bot to where its scenario starts, which corrects
+        // nothing.
+        const swarm = worker.swarm;
+        const placed = if (scenario.startSpot(swarm.config, self, swarm.bots.len)) |spot| at: {
+            for (spot, self.position) |want, have| if (@abs(want - have) > 0.01) break :at false;
+            break :at true;
+        } else false;
+        if (placed) self.placed = true;
+        if (self.spawned and !placed) {
             self.counters.add(.corrections, 1);
-        } else {
+        } else if (!self.spawned) {
             self.spawned = true;
             self.origin = self.position;
             packet = .init(&buffer, Out.packetId(.player_loaded));
             try self.queue(packet.bytes());
-            self.counters.mark(.spawned_ns, now());
+            self.markJoined();
         }
         try self.move(true);
+    }
+
+    /// Marks the bot joined once it is in the world and knows the world's spawn, which servers
+    /// send before or after the player's first position, as everywhere it goes is laid out from
+    /// the spawn.
+    fn markJoined(self: *Bot) void {
+        if (self.spawned and self.spawn != null) self.counters.mark(.spawned_ns, now());
     }
 
     /// Tells the server where the bot is, with its look when `look` is set.

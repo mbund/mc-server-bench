@@ -26,6 +26,9 @@ pub const metrics = "metrics";
 /// The file in Lightning Rod's directory that holds how many cows the cows scenario wants, as
 /// it has no console to summon them through. Its plugin reads it once a second.
 pub const cows_file = "cows";
+/// The file in Lightning Rod's directory the bench appends a line to for each player to move, a
+/// name and where, as it has no console for /tp. Its plugin reads it a few times a second.
+pub const teleports_file = "teleports";
 
 /// Blocks between neighbouring cows in `cows`: a cow's width, so neighbours stand touching and
 /// every step one takes pushes another, which tests collisions as well as ticking and sending.
