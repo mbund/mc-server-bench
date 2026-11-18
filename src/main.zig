@@ -256,12 +256,7 @@ fn hostInfo(allocator: std.mem.Allocator, io: std.Io) !Host {
         host.cpu = std.mem.trim(u8, line[(std.mem.indexOfScalar(u8, line, ':') orelse continue) + 1 ..], " \t");
         break;
     };
-    const meminfo = try readProc(allocator, io, "/proc/meminfo");
-    var fields = std.mem.tokenizeAny(u8, meminfo, " \n");
-    while (fields.next()) |field| if (std.mem.eql(u8, field, "MemTotal:")) {
-        host.memory_mb = @as(f64, @floatFromInt(try std.fmt.parseInt(u64, fields.next() orelse break, 10))) / 1024;
-        break;
-    };
+    host.memory_mb = @floatFromInt(try process.memoryMb());
     const name = std.posix.uname();
     host.kernel = try allocator.dupe(u8, std.mem.sliceTo(&name.release, 0));
     return host;

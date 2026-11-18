@@ -80,6 +80,14 @@ pub fn readProc(path: [:0]const u8, buffer: []u8) ![]const u8 {
     return buffer[0..length];
 }
 
+/// The machine's memory in megabytes, as the kernel counts it.
+pub fn memoryMb() !u64 {
+    var buffer: [8192]u8 = undefined;
+    const kilobytes = field(try readProc("/proc/meminfo", &buffer), "MemTotal:");
+    if (kilobytes == 0) return error.UnknownMemory;
+    return kilobytes / 1024;
+}
+
 /// Pins the calling thread, and the threads it starts after, to a list of CPUs like "0-7,12".
 pub fn pin(cpus: []const u8) !void {
     var set: linux.cpu_set_t = @splat(0);

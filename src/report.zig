@@ -30,7 +30,8 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         \\{d} runs. `./run.sh` reproduces them all, `./run.sh <server>` one server, and
         \\`scenarios/<scenario>.sh` one scenario, as CI runs each on a machine of its own.
         \\Every server gets the same render distance, {d} chunks, and simulation distance, {d} chunks, and
-        \\bots on their own CPUs.
+        \\bots on their own CPUs. The Java servers may grow their heap to three quarters of the
+        \\machine's memory, and the others may use all of it.
         \\Each scenario names the machine its runs measured on and charts how its measures grow with
         \\players, or cows in the cows scenario, followed by a table for every count.
         \\

@@ -5,6 +5,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const scenario = @import("scenario.zig");
 const config = @import("config.zig");
+const process = @import("process.zig");
 
 pub const Kind = enum {
     vanilla,
@@ -356,11 +357,21 @@ fn number(line: []const u8, label: []const u8) ?f64 {
     return std.fmt.parseFloat(f64, line[start..end]) catch null;
 }
 
+/// The heap a Java server may grow to: three quarters of the machine's memory, the rest left to
+/// the JVM's own memory, the system and the bots, as a machine given to one server would run it.
+/// The native servers have no such limit and may use all of it, so a smaller heap would end the
+/// Java servers' ramps where the bench set it rather than where they give out. It starts small and
+/// grows, so their memory measures what they use.
+fn javaHeap(allocator: std.mem.Allocator) ![]const u8 {
+    return std.fmt.allocPrint(allocator, "-Xmx{d}m", .{try process.memoryMb() * 3 / 4});
+}
+
 fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
     const root = options.root;
+    const heap = try javaHeap(allocator);
     return switch (options.kind) {
         .vanilla => try allocator.dupe([]const u8, &.{
-            "java", "-Xmx4G", try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/vanilla/server.jar" }), "--nogui",
+            "java", heap, try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/vanilla/server.jar" }), "--nogui",
         }),
         // Configured in code with the bench's settings, and takes the room for players and the cows
         // to spawn.
@@ -368,12 +379,12 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
         // Vanilla's jar unpacks where the vanilla runs unpack it, and the launcher finds its
         // libraries beside itself.
         .fabric, .@"fabric-occlusion" => try allocator.dupe([]const u8, &.{
-            "java", "-Xmx4G", try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/fabric/fabric-server-launch.jar" }), "--nogui",
+            "java", heap, try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/fabric/fabric-server-launch.jar" }), "--nogui",
         }),
         // Paper converts the vanilla world it is given at every start, quickly, but first waits 30
         // seconds for its owner to stop it and make a backup, which a measured startup would count.
         .paper, .@"paper-antixray-1" => try allocator.dupe([]const u8, &.{
-            "java", "-Xmx4G", "-Dpaper.disableMigrationDelay=true", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/paper/paper.jar" }), "--nogui",
+            "java", heap, "-Dpaper.disableMigrationDelay=true", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/paper/paper.jar" }), "--nogui",
         }),
         .pumpkin => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/pumpkin/target/release/pumpkin" })}),
         .steel => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/steel/target/release/steel" })}),
