@@ -38,7 +38,8 @@ measure() {
   done
 }
 
-# The players a ramp adds step by step, about half again each time, while the server keeps up,
-# each step settling 10 seconds and measured for 20.
-steps=1,2,4,8,16,24,32,48,64,96,128,192,256,384,512
+# The players a ramp adds step by step while the server keeps up, each step settling 10 seconds
+# and measured for 20. One player is the baseline; the steps double while every server keeps up,
+# and grow about half again each time from 128, where servers start to reach their limits.
+steps=1,16,32,64,128,192,256,384,512
 ramp=(--warmup=10 --seconds=20)
