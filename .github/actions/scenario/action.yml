@@ -81,3 +81,9 @@ runs:
       with:
         name: results-${{ inputs.scenario }}-${{ inputs.terrain }}
         path: runs/standard/results.jsonl
+    # Every server's own log of its runs, to see from the server's side what went wrong.
+    - uses: actions/upload-artifact@v7
+      with:
+        name: logs-${{ inputs.scenario }}-${{ inputs.terrain }}
+        path: runs/standard/**/server.log
+        retention-days: 7
