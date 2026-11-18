@@ -154,6 +154,11 @@ pub const Bot = struct {
     filled: usize = 0,
     output: []u8,
     queued: usize = 0,
+    /// Requests the worker's ring holds for the bot: a receive into the input after what it
+    /// holds, a send of the first `send_pending` bytes of its output, and its connect.
+    receive_pending: bool = false,
+    send_pending: usize = 0,
+    connect_pending: bool = false,
     entity: i32 = 0,
     spawned: bool = false,
     position: [3]f64 = @splat(0),
@@ -227,8 +232,13 @@ pub const Bot = struct {
         self.close();
     }
 
+    /// Its receive and send in the worker's ring complete once the socket is shut down, rather
+    /// than hold it open.
     fn close(self: *Bot) void {
-        if (self.fd >= 0) _ = linux.close(self.fd);
+        if (self.fd >= 0) {
+            _ = linux.shutdown(self.fd, linux.SHUT.RDWR);
+            _ = linux.close(self.fd);
+        }
         self.fd = -1;
     }
 
@@ -277,23 +287,17 @@ pub const Bot = struct {
         self.counters.add(.packets_out, 1);
     }
 
-    fn flush(self: *Bot) !void {
-        var sent: usize = 0;
-        while (sent < self.queued) {
-            const result = linux.write(self.fd, self.output[sent..].ptr, self.queued - sent);
-            switch (linux.errno(result)) {
-                .SUCCESS => sent += result,
-                .AGAIN => break,
-                .INTR => continue,
-                else => return error.WriteFailed,
-            }
-        }
-        self.counters.add(.bytes_out, sent);
-        std.mem.copyForwards(u8, self.output[0 .. self.queued - sent], self.output[sent..self.queued]);
-        self.queued -= sent;
+    /// The first `count` bytes of the output went out.
+    fn wrote(self: *Bot, count: usize) void {
+        assert(count <= self.send_pending and self.send_pending <= self.queued);
+        self.counters.add(.bytes_out, count);
+        std.mem.copyForwards(u8, self.output[0 .. self.queued - count], self.output[count..self.queued]);
+        self.queued -= count;
+        self.send_pending = 0;
     }
 
-    fn connect(self: *Bot, address: linux.sockaddr.in, view_distance: u8) !void {
+    /// A socket of its own, which the worker's ring connects.
+    fn open(self: *Bot) !void {
         const socket = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
         if (linux.errno(socket) != .SUCCESS) return error.SocketFailed;
         self.fd = @intCast(socket);
@@ -302,16 +306,10 @@ pub const Bot = struct {
         self.decrypt_from = null;
         const one: i32 = 1;
         _ = linux.setsockopt(self.fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, std.mem.asBytes(&one), @sizeOf(i32));
-        while (true) {
-            const result = linux.connect(self.fd, &address, @sizeOf(linux.sockaddr.in));
-            switch (linux.errno(result)) {
-                .SUCCESS => break,
-                .INTR => continue,
-                else => return error.ConnectFailed,
-            }
-        }
-        const flags = linux.fcntl(self.fd, linux.F.GETFL, 0);
-        _ = linux.fcntl(self.fd, linux.F.SETFL, flags | @as(usize, @bitCast(@as(isize, @as(u32, @bitCast(linux.O{ .NONBLOCK = true }))))));
+    }
+
+    /// Logs in once connected.
+    fn connected(self: *Bot, address: linux.sockaddr.in, view_distance: u8) !void {
         self.phase.store(.login, .release);
 
         var buffer: [128]u8 = undefined;
@@ -330,23 +328,16 @@ pub const Bot = struct {
     }
 
     /// Reads what the socket holds and handles every whole frame in it.
-    fn receive(self: *Bot, worker: *Worker) !void {
-        while (true) {
-            if (self.filled == self.input.len) return error.FrameTooLarge;
-            const result = linux.read(self.fd, self.input[self.filled..].ptr, self.input.len - self.filled);
-            switch (linux.errno(result)) {
-                .SUCCESS => {},
-                .AGAIN => break,
-                .INTR => continue,
-                else => return error.ReadFailed,
-            }
-            if (result == 0) return error.ConnectionClosed;
+    /// Handles the `result` bytes the ring received after what the input held: every whole
+    /// frame now in it.
+    fn received(self: *Bot, worker: *Worker, result: usize) !void {
+        assert(result > 0 and result <= self.input.len - self.filled);
+        {
             if (self.receiving) |*cipher| {
                 const read = self.input[self.filled..][0..result];
                 cipher.transform(.decrypt, read, read);
             }
             self.filled += result;
-            self.counters.add(.bytes_in, result);
 
             var start: usize = 0;
             while (start < self.filled) {
@@ -369,6 +360,7 @@ pub const Bot = struct {
             }
             std.mem.copyForwards(u8, self.input[0 .. self.filled - start], self.input[start..self.filled]);
             self.filled -= start;
+            if (self.filled == self.input.len) return error.FrameTooLarge;
         }
     }
 
@@ -737,16 +729,27 @@ pub const Configuration = struct {
     dump: ?linux.fd_t = null,
 };
 
-/// The bots of one thread and the scratch they share.
+/// The bots of one thread and the scratch they share. A pass does each kind of work for all of
+/// them at once: their completions, their tick, their actions, then the receive, send and connect
+/// each needs, submitted together with one system call that also waits for the next completion.
 const Worker = struct {
     swarm: *Swarm,
     first: usize,
     last: usize,
     decoded: []u8,
     workspace: java.Wire.Workspace,
-    descriptors: []linux.pollfd,
-    owners: []u32,
+    ring: linux.IoUring,
+    completions: []linux.io_uring_cqe,
+    /// When the earliest timeout armed in the ring fires, or never.
+    alarm: u64 = std.math.maxInt(u64),
+    alarm_time: linux.kernel_timespec = undefined,
     thread: ?std.Thread = null,
+
+    const Request = enum(u2) { receive, send, connect, alarm };
+
+    fn tag(index: u64, request: Request) u64 {
+        return index << 2 | @intFromEnum(request);
+    }
 
     fn run(self: *Worker) void {
         const swarm = self.swarm;
@@ -755,15 +758,23 @@ const Worker = struct {
         while (!swarm.stopping.load(.acquire)) {
             const moment = now();
             var next_join: u64 = std.math.maxInt(u64);
-            for (swarm.bots[self.first..self.last]) |*bot| {
-                if (bot.phase.load(.monotonic) != .waiting) continue;
+            for (swarm.bots[self.first..self.last], self.first..) |*bot, index| {
+                if (bot.phase.load(.monotonic) != .waiting or bot.fd >= 0) continue;
                 const due = bot.due_ns.load(.acquire);
                 if (due == std.math.maxInt(u64)) continue;
                 if (moment < due) {
                     next_join = @min(next_join, due);
                     continue;
                 }
-                bot.connect(swarm.address, scenario.view_distance) catch |err| bot.fail(err, "could not connect");
+                bot.open() catch |err| {
+                    bot.fail(err, "could not open a socket");
+                    continue;
+                };
+                _ = self.ring.connect(tag(index, .connect), bot.fd, @ptrCast(&swarm.address), @sizeOf(linux.sockaddr.in)) catch |err| {
+                    bot.fail(err, "could not connect");
+                    continue;
+                };
+                bot.connect_pending = true;
             }
             if (moment >= next_tick) {
                 for (swarm.bots[self.first..self.last]) |*bot| {
@@ -785,30 +796,77 @@ const Worker = struct {
                 next_action = @min(next_action, bot.action_due_ns);
             }
 
-            var count: usize = 0;
             for (swarm.bots[self.first..self.last], self.first..) |*bot, index| {
-                if (bot.fd < 0) continue;
-                if (bot.queued > 0) bot.flush() catch |err| bot.fail(err, "write failed");
-                if (bot.fd < 0) continue;
-                self.descriptors[count] = .{ .fd = bot.fd, .events = @as(i16, linux.POLL.IN) | @as(i16, if (bot.queued > 0) linux.POLL.OUT else 0) };
-                self.owners[count] = @intCast(index);
-                count += 1;
-            }
-            const wake = @min(@min(next_tick, next_join), next_action);
-            const later = now();
-            const timeout: i32 = if (wake <= later) 0 else @intCast(@min(50, (wake - later + std.time.ns_per_ms - 1) / std.time.ns_per_ms));
-            const ready = linux.poll(self.descriptors.ptr, count, timeout);
-            if (linux.errno(ready) != .SUCCESS) continue;
-            for (self.descriptors[0..count], self.owners[0..count]) |descriptor, owner| {
-                if (descriptor.revents == 0) continue;
-                const bot = &swarm.bots[owner];
-                if (descriptor.revents & (linux.POLL.IN | linux.POLL.HUP | linux.POLL.ERR) != 0) {
-                    bot.receive(self) catch |err| bot.fail(err, @errorName(err));
+                if (bot.fd < 0 or bot.connect_pending) continue;
+                if (!bot.receive_pending) {
+                    _ = self.ring.recv(tag(index, .receive), bot.fd, .{ .buffer = bot.input[bot.filled..] }, 0) catch |err| {
+                        bot.fail(err, "could not receive");
+                        continue;
+                    };
+                    bot.receive_pending = true;
                 }
-                if (bot.fd >= 0 and bot.queued > 0) bot.flush() catch |err| bot.fail(err, "write failed");
+                if (bot.send_pending == 0 and bot.queued > 0) {
+                    _ = self.ring.send(tag(index, .send), bot.fd, bot.output[0..bot.queued], 0) catch |err| {
+                        bot.fail(err, "could not send");
+                        continue;
+                    };
+                    bot.send_pending = bot.queued;
+                }
             }
+
+            // The ring wakes the worker at the next tick, join or action, unless an earlier
+            // timeout already will.
+            const wake = @min(next_tick, next_join, next_action);
+            if (wake < self.alarm) {
+                self.alarm_time = .{ .sec = @intCast(wake / std.time.ns_per_s), .nsec = @intCast(wake % std.time.ns_per_s) };
+                if (self.ring.timeout(tag(wake, .alarm), &self.alarm_time, 0, linux.IORING_TIMEOUT_ABS)) |_| {
+                    self.alarm = wake;
+                } else |_| {}
+            }
+            _ = self.ring.submit_and_wait(1) catch continue;
+            const count = self.ring.copy_cqes(self.completions, 0) catch continue;
+            for (self.completions[0..count]) |completion| self.complete(completion);
         }
         for (swarm.bots[self.first..self.last]) |*bot| bot.close();
+    }
+
+    fn complete(self: *Worker, completion: linux.io_uring_cqe) void {
+        const request: Request = @enumFromInt(completion.user_data & 3);
+        const index = completion.user_data >> 2;
+        if (request == .alarm) {
+            if (index == self.alarm) self.alarm = std.math.maxInt(u64);
+            return;
+        }
+        const bot = &self.swarm.bots[index];
+        switch (request) {
+            .connect => bot.connect_pending = false,
+            .receive => bot.receive_pending = false,
+            .send => {},
+            .alarm => unreachable,
+        }
+        // A bot that failed shut its socket, which ends what it had in the ring.
+        if (bot.fd < 0) {
+            if (request == .send) bot.send_pending = 0;
+            return;
+        }
+        const result = completion.res;
+        switch (request) {
+            .connect => {
+                if (result < 0) return bot.fail(error.ConnectFailed, "could not connect");
+                bot.connected(self.swarm.address, scenario.view_distance) catch |err| bot.fail(err, "could not log in");
+            },
+            .receive => {
+                if (result < 0) return bot.fail(error.ReadFailed, "receive failed");
+                if (result == 0) return bot.fail(error.ConnectionClosed, @errorName(error.ConnectionClosed));
+                bot.counters.add(.bytes_in, @intCast(result));
+                bot.received(self, @intCast(result)) catch |err| bot.fail(err, @errorName(err));
+            },
+            .send => {
+                if (result < 0) return bot.fail(error.WriteFailed, "write failed");
+                bot.wrote(@intCast(result));
+            },
+            .alarm => unreachable,
+        }
     }
 };
 
@@ -852,8 +910,9 @@ pub const Swarm = struct {
                 .last = last,
                 .decoded = try allocator.alloc(u8, decoded_maximum),
                 .workspace = try java.Wire.Workspace.init(allocator),
-                .descriptors = try allocator.alloc(linux.pollfd, last - first),
-                .owners = try allocator.alloc(u32, last - first),
+                // Room for each bot's receive, send and connect, and the timeouts in between.
+                .ring = try linux.IoUring.init(try std.math.ceilPowerOfTwo(u16, @intCast(3 * (last - first) + 16)), 0),
+                .completions = try allocator.alloc(linux.io_uring_cqe, 6 * (last - first) + 32),
             };
         }
         return self;
