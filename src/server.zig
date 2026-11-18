@@ -373,6 +373,12 @@ fn javaHeap(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "-Xmx{d}m", .{try process.memoryMb() * 3 / 4});
 }
 
+/// Room Folia gets beyond the players of a run. Folia counts players still logging in as on the
+/// server, and bots join a fifth of a second apart and take about a second to, so with room for
+/// exactly the run's players it turns the last of each step away as full. A Java server sets
+/// nothing aside for room it does not use, so the room costs it nothing.
+const folia_headroom = 8;
+
 fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
     const root = options.root;
     const heap = try javaHeap(allocator);
@@ -433,7 +439,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\allow-flight=true
                 \\{s}
             , .{
-                config.port, world, scenario.view_distance, config.simulation_distance, config.maxPlayers(options.players),
+                config.port, world, scenario.view_distance, config.simulation_distance, config.maxPlayers(options.players) + @as(usize, if (options.kind == .folia) folia_headroom else 0),
                 // Pregenerating loads a thousand chunks at once, and a tick waiting on them can pass
                 // the minute after which vanilla's watchdog stops the server. It is not measured,
                 // so the watchdog is off then.
