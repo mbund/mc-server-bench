@@ -123,7 +123,10 @@ fn machines(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const 
     if (seen.items.len == 0) return;
     try writer.writeAll(if (seen.items.len == 1) "**Machine:**" else "**Machines** (these runs were joined from more than one, so they compare less exactly):");
     for (seen.items, 0..) |run, index| {
-        try writer.print("{s} {s}, {d:.0} CPUs, {d:.1} GB memory, Linux {s}", .{ if (index == 0) "" else ";", text(run, &.{ "host", "cpu" }), number(run, &.{ "host", "cpus" }), number(run, &.{ "host", "memory_mb" }) / 1024, text(run, &.{ "host", "kernel" }) });
+        try writer.print("{s} {s}, {d:.0} CPUs", .{ if (index == 0) "" else ";", text(run, &.{ "host", "cpu" }), number(run, &.{ "host", "cpus" }) });
+        if (number(run, &.{ "host", "cores" }) != 0) try writer.print(" on {d:.0} cores", .{number(run, &.{ "host", "cores" })});
+        try writer.print(", {d:.1} GB memory, Linux {s}", .{ number(run, &.{ "host", "memory_mb" }) / 1024, text(run, &.{ "host", "kernel" }) });
+        if (text(run, &.{ "host", "server_cpus" }).len != 0) try writer.print(", the server on CPUs {s} and the bots on {s}", .{ text(run, &.{ "host", "server_cpus" }), text(run, &.{ "host", "bot_cpus" }) });
     }
     try writer.writeAll("\n\n");
 }

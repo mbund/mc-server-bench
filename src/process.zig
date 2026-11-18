@@ -113,41 +113,53 @@ test "fields read past their labels" {
     try std.testing.expectEqual(@as(u64, 0), field("Name:\tx\n", "VmRSS:"));
 }
 
-/// The CPUs of the server and of the bots when not given: the first half of the physical cores
-/// and the rest, so the bots never run on a hyperthread of a core the server runs on. Without
-/// readable topology, or with a single core, the first half of the CPUs and the rest.
-pub const CpuSplit = struct { server: []const u8, bots: []const u8 };
+/// The CPUs of the server and of the bots when not given. The bots, which cost little, get a
+/// quarter of the CPUs and at least one, from the last physical core, and the server the rest, so
+/// that servers which spread work over threads, collectors and thread pools have the room a real
+/// host gives them. Without readable topology, the last quarter of the CPUs.
+pub const CpuSplit = struct { server: []const u8, bots: []const u8, cores: usize };
 
 pub fn splitCores(allocator: std.mem.Allocator, io: std.Io, cpus: usize) !CpuSplit {
     std.debug.assert(cpus >= 2);
+    const bot_count = @max(1, cpus / 4);
+    // Every CPU, ordered by the physical core it is on, cores in the order they first appear.
+    const order = try allocator.alloc(usize, cpus);
     const cores = try allocator.alloc(u64, cpus);
-    var core_count: usize = 0;
     const owners = try allocator.alloc(usize, cpus);
+    var core_count: usize = 0;
+    var known = true;
     for (0..cpus) |cpu| {
-        const core = coreOf(io, cpu) orelse return halves(allocator, cpus);
-        const known = std.mem.indexOfScalar(u64, cores[0..core_count], core) orelse known: {
+        const core = coreOf(io, cpu) orelse {
+            known = false;
+            break;
+        };
+        owners[cpu] = std.mem.indexOfScalar(u64, cores[0..core_count], core) orelse found: {
             cores[core_count] = core;
             core_count += 1;
-            break :known core_count - 1;
+            break :found core_count - 1;
         };
-        owners[cpu] = known;
     }
-    if (core_count < 2) return halves(allocator, cpus);
+    if (known) {
+        var at: usize = 0;
+        for (0..core_count) |core| for (owners[0..cpus], 0..) |owner, cpu| if (owner == core) {
+            order[at] = cpu;
+            at += 1;
+        };
+    } else {
+        core_count = cpus;
+        for (order, 0..) |*cpu, index| cpu.* = index;
+    }
+    const is_bot = try allocator.alloc(bool, cpus);
+    @memset(is_bot, false);
+    for (order[cpus - bot_count ..]) |cpu| is_bot[cpu] = true;
     var server: std.ArrayList(u8) = .empty;
     var bots: std.ArrayList(u8) = .empty;
-    for (owners[0..cpus], 0..) |owner, cpu| {
-        const list = if (owner < core_count / 2) &server else &bots;
+    for (is_bot, 0..) |bot, cpu| {
+        const list = if (bot) &bots else &server;
         if (list.items.len != 0) try list.append(allocator, ',');
         try list.print(allocator, "{d}", .{cpu});
     }
-    return .{ .server = server.items, .bots = bots.items };
-}
-
-fn halves(allocator: std.mem.Allocator, cpus: usize) !CpuSplit {
-    return .{
-        .server = try std.fmt.allocPrint(allocator, "0-{d}", .{cpus / 2 - 1}),
-        .bots = try std.fmt.allocPrint(allocator, "{d}-{d}", .{ cpus / 2, cpus - 1 }),
-    };
+    return .{ .server = server.items, .bots = bots.items, .cores = core_count };
 }
 
 /// The physical core a CPU is on, as its package and core, or null when the kernel does not say.
@@ -163,11 +175,11 @@ fn coreOf(io: std.Io, cpu: usize) ?u64 {
     return ids[0] << 32 | ids[1];
 }
 
-test "the split keeps each physical core's hyperthreads together" {
+test "the bots get a quarter of the cpus and the server the rest" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const cpus = try std.Thread.getCpuCount();
     if (cpus < 2) return error.SkipZigTest;
     const split = try splitCores(arena.allocator(), std.testing.io, cpus);
-    try std.testing.expect(split.server.len > 0 and split.bots.len > 0);
+    try std.testing.expect(split.server.len > 0 and split.bots.len > 0 and split.cores >= 1);
 }

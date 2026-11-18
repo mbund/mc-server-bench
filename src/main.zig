@@ -58,15 +58,12 @@ pub fn main(init: std.process.Init) !void {
     }
     var settings: Settings = .{};
     for (args[2..]) |argument| try parseOption(&settings, argument);
-    // The server takes the first half of the physical cores and the bots the rest, unless told
-    // otherwise, so neither runs on the other's hyperthreads.
+    // The bots get a quarter of the CPUs and the server the rest, unless told otherwise.
     const cpus = try std.Thread.getCpuCount();
     if (cpus < 2) return error.TooFewCpus;
-    if (settings.server_cpus == null or settings.bot_cpus == null) {
-        const split = try process.splitCores(allocator, init.io, cpus);
-        if (settings.server_cpus == null) settings.server_cpus = split.server;
-        if (settings.bot_cpus == null) settings.bot_cpus = split.bots;
-    }
+    const split = try process.splitCores(allocator, init.io, cpus);
+    if (settings.server_cpus == null) settings.server_cpus = split.server;
+    if (settings.bot_cpus == null) settings.bot_cpus = split.bots;
     if (std.mem.eql(u8, verb, "run")) std.log.info("server cpus {s}, bot cpus {s}", .{ settings.server_cpus.?, settings.bot_cpus.? });
     if (std.mem.eql(u8, verb, "recipe")) {
         const kind = settings.server orelse return usage();
@@ -89,7 +86,10 @@ pub fn main(init: std.process.Init) !void {
     if (steps.len == 0 or steps[0] == 0) return usage();
     for (steps[1..], steps[0 .. steps.len - 1]) |after, before| if (after <= before) return usage();
     // Before pinning, while every CPU still counts.
-    const host = try hostInfo(allocator, init.io);
+    var host = try hostInfo(allocator, init.io);
+    host.cores = split.cores;
+    host.server_cpus = settings.server_cpus.?;
+    host.bot_cpus = settings.bot_cpus.?;
     // Bots keep to their own CPUs, apart from the server's.
     try process.pin(settings.bot_cpus.?);
     const root = try std.process.currentPathAlloc(init.io, allocator);
@@ -250,6 +250,11 @@ pub const Window = struct {
 pub const Host = struct {
     cpu: []const u8 = "",
     cpus: usize = 0,
+    /// Physical cores, which the CPUs share as hyperthreads when there are fewer.
+    cores: usize = 0,
+    /// The CPUs the server and the bots ran on.
+    server_cpus: []const u8 = "",
+    bot_cpus: []const u8 = "",
     kernel: []const u8 = "",
     memory_mb: f64 = 0,
 };
