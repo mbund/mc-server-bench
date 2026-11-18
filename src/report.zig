@@ -31,9 +31,32 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         \\`scenarios/<scenario>.sh` one scenario, as CI runs each on a machine of its own.
         \\Every server gets the same render distance, {d} chunks, and simulation distance, {d} chunks, and
         \\bots on their own CPUs. The Java servers may grow their heap to three quarters of the
-        \\machine's memory, and the others may use all of it. Every session is encrypted, as on a
-        \\server open to the internet, but no server asks Mojang who players are: the servers built on
-        \\vanilla, which encrypt only in online mode, ask the bench instead, one local request a join.
+        \\machine's memory, and the others may use all of it.
+        \\
+    , .{ runs.items.len, scenario.view_distance, config.simulation_distance });
+    // Results from before the setting existed were encrypted.
+    var plain: usize = 0;
+    for (runs.items) |run| {
+        if (run.get("encrypted")) |value| plain += @intFromBool(value == .bool and !value.bool);
+    }
+    if (plain == 0) {
+        try writer.writeAll(
+            \\Every session is encrypted, as on a server open to the internet, but no server asks Mojang
+            \\who players are: the servers built on vanilla, which encrypt only in online mode, ask the
+            \\bench instead, one local request a join.
+            \\
+        );
+    } else if (plain == runs.items.len) {
+        try writer.writeAll(
+            \\No session is encrypted, which leaves out what a server open to the internet spends on its
+            \\cipher, to measure the rest of it.
+            \\
+        );
+    } else try writer.print(
+        \\{d} of the runs encrypt their sessions and {d} do not, so compare runs of the same kind.
+        \\
+    , .{ runs.items.len - plain, plain });
+    try writer.writeAll(
         \\Each scenario names the machine its runs measured on and charts how its measures grow with
         \\players, or cows in the cows scenario, followed by a table for every count.
         \\
@@ -42,7 +65,7 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         \\| Server | Version |
         \\|---|---|
         \\
-    , .{ runs.items.len, scenario.view_distance, config.simulation_distance });
+    );
     for (std.enums.values(server_module.Kind)) |kind| {
         const run = for (runs.items) |candidate| {
             if (std.mem.eql(u8, text(candidate, &.{"server"}), @tagName(kind))) break candidate;

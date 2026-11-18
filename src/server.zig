@@ -180,6 +180,8 @@ pub const Options = struct {
     terrain: Terrain = .flat,
     /// Generating the world to pregenerate it, rather than starting from it.
     generating: bool = false,
+    /// Whether sessions are encrypted.
+    encryption: bool = true,
 };
 
 /// A tick report, as vanilla's `tick query` prints it.
@@ -391,7 +393,7 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
         }),
         // Configured in code with the bench's settings, and takes the room for players and the cows
         // to spawn.
-        .@"lightning-rod" => try allocator.dupe([]const u8, &.{ try std.fs.path.join(allocator, &.{ root, "servers/build/lightning-rod/bin/lightning_rod" }), try std.fmt.allocPrint(allocator, "{d}", .{config.maxPlayers(options.players)}), try std.fmt.allocPrint(allocator, "{d}", .{options.cows}) }),
+        .@"lightning-rod" => try allocator.dupe([]const u8, &.{ try std.fs.path.join(allocator, &.{ root, "servers/build/lightning-rod/bin/lightning_rod" }), try std.fmt.allocPrint(allocator, "{d}", .{config.maxPlayers(options.players)}), try std.fmt.allocPrint(allocator, "{d}", .{options.cows}), if (options.encryption) "encrypted" else "plain" }),
         // Vanilla's jar unpacks where the vanilla runs unpack it, and the launcher finds its
         // libraries beside itself.
         .@"fabric-optimized" => try allocator.dupe([]const u8, &.{
@@ -445,7 +447,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             , .{
                 // Vanilla encrypts only in online mode, checking players with the bench's session
                 // server. Generating a world needs no players.
-                !options.generating,
+                options.encryption and !options.generating,
                 config.port, world, scenario.view_distance, config.simulation_distance, config.maxPlayers(options.players) + @as(usize, if (options.kind == .folia) folia_headroom else 0),
                 // Pregenerating loads a thousand chunks at once, and a tick waiting on them can pass
                 // the minute after which vanilla's watchdog stops the server. It is not measured,
@@ -471,7 +473,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\
                 \\[networking.java]
                 \\address = "0.0.0.0:{d}"
-                \\encryption = true
+                \\encryption = {}
                 \\online_mode = false
                 \\max_players = {d}
                 \\view_distance = {d}
@@ -480,7 +482,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\[networking.bedrock]
                 \\enabled = false
                 \\
-            , .{ terrain_seed, config.port, config.maxPlayers(options.players), scenario.view_distance, config.simulation_distance }) });
+            , .{ terrain_seed, config.port, options.encryption, config.maxPlayers(options.players), scenario.view_distance, config.simulation_distance }) });
             // Vanilla's world, whose generation settings also give Pumpkin its flat layers.
             try copy(allocator, io, vanilla_world, try path(allocator, options.directory, "world"));
         },
@@ -494,7 +496,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             text = try setting(allocator, text, "view_distance", try std.fmt.allocPrint(allocator, "{d}", .{scenario.view_distance}));
             text = try setting(allocator, text, "simulation_distance", try std.fmt.allocPrint(allocator, "{d}", .{config.simulation_distance}));
             text = try setting(allocator, text, "online_mode", "false");
-            text = try setting(allocator, text, "encryption", "true");
+            text = try setting(allocator, text, "encryption", if (options.encryption) "true" else "false");
             text = try setting(allocator, text, "allow_flight", "true");
             text = try setting(allocator, text, "use_favicon", "false");
             text = try setting(allocator, text, "threshold", "256");

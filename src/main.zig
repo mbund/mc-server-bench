@@ -33,6 +33,9 @@ pub const Settings = struct {
     join_interval_ms: u64 = 200,
     out: []const u8 = "runs/latest",
     keep_worlds: bool = false,
+    /// Whether sessions are encrypted, as on a server open to the internet. Off measures the rest
+    /// of a server without the cost of its cipher.
+    encryption: bool = true,
     dump_frames: ?[]const u8 = null,
     /// The port of a server `bots` joins, already running on this machine.
     port: u16 = config.port,
@@ -87,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
     const root = try std.process.currentPathAlloc(init.io, allocator);
     try std.Io.Dir.cwd().createDirPath(init.io, settings.out);
     // The servers built on vanilla ask it who joining bots are, as they encrypt only in online mode.
-    try @import("session_server.zig").start();
+    if (settings.encryption) try @import("session_server.zig").start();
     const results_path = try std.fs.path.join(allocator, &.{ settings.out, "results.jsonl" });
 
     try measure(allocator, init.io, root, settings, server, kind, steps, results_path, host);
@@ -111,7 +114,7 @@ fn usage() error{InvalidArguments} {
         \\scenarios: idle wander spread explore build cows
         \\options: --warmup=<s> --seconds=<s> --server-cpus=<list> --bot-cpus=<list>
         \\         --bot-threads=<n> --join-interval=<ms> --out=<directory> --keep-worlds
-        \\         --dump-frames=<path prefix>
+        \\         --dump-frames=<path prefix> --encryption=on|off
     , .{});
     return error.InvalidArguments;
 }
@@ -160,6 +163,8 @@ fn parseOption(settings: *Settings, argument: []const u8) !void {
         settings.port = try std.fmt.parseInt(u16, value, 10);
     } else if (std.mem.eql(u8, name, "--keep-worlds")) {
         settings.keep_worlds = true;
+    } else if (std.mem.eql(u8, name, "--encryption")) {
+        settings.encryption = (try parseName(enum { on, off }, value)) == .on;
     } else {
         std.log.err("unknown option {s}", .{argument});
         return error.InvalidArguments;
@@ -274,6 +279,8 @@ pub const Result = struct {
     host: Host = .{},
     terrain: []const u8,
     scenario: []const u8,
+    /// Whether the sessions were encrypted.
+    encrypted: bool = true,
     players: usize,
     /// Cows summoned around the players, in the cows scenario.
     cows: usize = 0,
@@ -430,6 +437,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         .host = host,
         .terrain = @tagName(settings.terrain),
         .scenario = @tagName(scenario_kind),
+        .encrypted = settings.encryption,
         .players = 0,
         .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(),
         .startup_s = 0,
@@ -446,6 +454,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         .cpus = settings.server_cpus.?,
         .metrics = metrics,
         .terrain = settings.terrain,
+        .encryption = settings.encryption,
     });
     var stopped = false;
     defer if (!stopped) {

@@ -22,12 +22,14 @@ pub fn main(init: std.process.Init) !void {
     var memory = lightning_rod.Memory.init(lightning_rod.system.huge_page_allocator, init.io);
     defer memory.deinit();
     const allocator = memory.allocator("bootstrap");
-    // The bench passes the room it gives every server for the run, and room for the most cows it
-    // spawns.
+    // The bench passes the room it gives every server for the run, room for the most cows it
+    // spawns, and whether sessions are encrypted.
     const arguments = try init.minimal.args.toSlice(init.arena.allocator());
-    if (arguments.len != 3) return error.MissingArguments;
+    if (arguments.len != 4) return error.MissingArguments;
     const max_players = try std.fmt.parseInt(usize, arguments[1], 10);
     const cows = try std.fmt.parseInt(usize, arguments[2], 10);
+    const encrypted = std.mem.eql(u8, arguments[3], "encrypted");
+    if (!encrypted and !std.mem.eql(u8, arguments[3], "plain")) return error.InvalidArguments;
 
     const gameplay = lightning_rod.plugin.compose(.{
         lightning_rod.plugin.replace(vanilla.plugins(), .{
@@ -43,13 +45,13 @@ pub fn main(init: std.process.Init) !void {
     var protocols = try protocol_set.Default.init(allocator);
     defer protocols.deinit(allocator);
     // Sessions are encrypted, as on any server open to the internet, without asking Mojang who
-    // players are.
+    // players are, unless the bench turns encryption off to measure everything else.
     var key = try java.RsaPrivateKey.init(@import("encryption_key").der);
     defer key.deinit();
     const network = lightning_rod.plugin.compose(.{
         lightning_rod.plugin.configured(protocol_set.Handshake, protocol_set.Handshake.Configuration{}),
         lightning_rod.plugin.replace(connection_plugins(&protocols), .{
-            lightning_rod.plugin.configured(LoginEncryption, LoginEncryption.Configuration{ .key = &key }),
+            lightning_rod.plugin.configured(LoginEncryption, LoginEncryption.Configuration{ .key = if (encrypted) &key else null }),
         }),
     });
     try profile.Server(@TypeOf(gameplay), protocol_set.Endpoint, @TypeOf(network), sessions.SingleSimulation).run(&memory, init, .{

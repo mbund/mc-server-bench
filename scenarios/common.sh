@@ -2,16 +2,19 @@
 # in it or where it is not needed, the servers named or every one, built unless CI built them
 # already, and `measure`, which runs each of those servers with the same harness options.
 # --terrain=<terrain> runs only the runs on that terrain, as CI runs each terrain of a scenario on
-# a machine of its own.
+# a machine of its own. --encryption=off runs every server without encrypting its sessions, to
+# measure the rest of it.
 set -euo pipefail
 script=$(realpath "$0")
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 if [ -z "${MC_SERVER_BENCH_SHELL:-}" ]; then exec nix develop --command "$script" "$@"; fi
 servers=()
 only=
+encryption=on
 for argument in "$@"; do
   case $argument in
     --terrain=*) only=${argument#--terrain=} ;;
+    --encryption=*) encryption=${argument#--encryption=} ;;
     *) servers+=("$argument") ;;
   esac
 done
@@ -31,7 +34,7 @@ measure() {
     if [[ -n $only && $argument == --terrain=* && $argument != "--terrain=$only" ]]; then return; fi
   done
   for server in "${servers[@]}"; do
-    ./zig-out/bin/bench run --server="$server" --out="$out" "$@" || echo "$server failed: $*" >&2
+    ./zig-out/bin/bench run --server="$server" --out="$out" --encryption="$encryption" "$@" || echo "$server failed: $*" >&2
   done
 }
 
