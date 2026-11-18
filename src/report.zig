@@ -145,7 +145,8 @@ fn chartLink(allocator: std.mem.Allocator, charts_url: ?[]const u8, name: []cons
 }
 
 /// A measure of a server itself rather than of how it grows with players, taken from the idle
-/// runs: the median of all of them, or the one with the fewest players.
+/// runs: the median of all of them, or that of the last step of the ramp, where the server stopped
+/// and its world was measured.
 const ServerMeasure = struct {
     title: []const u8,
     column: []const u8,
@@ -174,18 +175,18 @@ fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writ
             var row: charts.Row = .{ .server = server, .values = @splat(null) };
             for (terrains, &row.values) |terrain, *value| {
                 var samples: std.ArrayList(f64) = .empty;
-                var fewest: ?Object = null;
+                var last: ?Object = null;
                 for (runs) |run| {
                     if (!matches(run, terrain, .idle) or !std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) continue;
                     const measured = number(run, measure.path);
                     if (measured > 0) try samples.append(allocator, measured);
-                    if (fewest == null or number(run, &.{"players"}) < number(fewest.?, &.{"players"})) fewest = run;
+                    if (last == null or number(run, &.{"players"}) > number(last.?, &.{"players"})) last = run;
                 }
                 if (measure.median) {
                     if (samples.items.len == 0) continue;
                     std.mem.sort(f64, samples.items, {}, std.sort.asc(f64));
                     value.* = samples.items[samples.items.len / 2];
-                } else if (fewest) |run| {
+                } else if (last) |run| {
                     const measured = number(run, measure.path);
                     if (measured > 0) value.* = measured;
                 }
@@ -207,8 +208,8 @@ fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writ
         \\Startup is timed from launching the server three ways: to its first answer to a status
         \\request, to a player logged in, without authentication, holding its first chunk, and to
         \\that player holding every chunk of its render distance. Each is the median of the server's
-        \\idle runs. **World on disk** is everything the server keeps for its world after the idle run
-        \\with the fewest players, caches included. On real terrain every server starts from the same
+        \\idle runs. **World on disk** is everything the server keeps for its world once its idle ramp
+        \\stopped, caches included. On real terrain every server starts from the same
         \\square of pregenerated chunks, which SteelMC, reading no vanilla worlds, generates itself.
         \\
         \\![Startup times and world size on disk of every server, flat and real terrain, on log scales]({s})
