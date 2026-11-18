@@ -18,7 +18,11 @@ const assert = std.debug.assert;
 /// Largest frame and decoded packet a bot accepts, as the vanilla client does.
 const frame_maximum = (1 << 21) + 3;
 const decoded_maximum = 8 * 1024 * 1024;
-const output_capacity = 64 * 1024;
+/// What each bot holds of its input: whole frames of every packet servers send it in play, chunks
+/// included. A larger frame goes into its worker's `overflow`, one bot's at a time.
+const input_capacity = 64 * 1024;
+/// What a bot queues to send in a pass, a few small packets.
+const output_capacity = 8 * 1024;
 const tick_ns = 50 * std.time.ns_per_ms;
 /// The chunks per tick a bot asks for after each batch, about what a vanilla client on a desktop
 /// asks for. Servers cap it, vanilla at 64.
@@ -159,6 +163,11 @@ pub const Bot = struct {
     receive_pending: bool = false,
     send_pending: usize = 0,
     connect_pending: bool = false,
+    /// Receiving a frame larger than `input`, of `frame_total` bytes, into the worker's overflow,
+    /// or waiting for another bot of the worker to finish with it.
+    large: bool = false,
+    waiting_overflow: bool = false,
+    frame_total: usize = 0,
     entity: i32 = 0,
     spawned: bool = false,
     position: [3]f64 = @splat(0),
@@ -331,37 +340,69 @@ pub const Bot = struct {
     /// Handles the `result` bytes the ring received after what the input held: every whole
     /// frame now in it.
     fn received(self: *Bot, worker: *Worker, result: usize) !void {
-        assert(result > 0 and result <= self.input.len - self.filled);
-        {
-            if (self.receiving) |*cipher| {
-                const read = self.input[self.filled..][0..result];
-                cipher.transform(.decrypt, read, read);
-            }
-            self.filled += result;
-
-            var start: usize = 0;
-            while (start < self.filled) {
-                const length, const prefix = readVarint(self.input[start..self.filled]) catch |err| switch (err) {
-                    error.Incomplete => break,
-                    else => return err,
-                };
-                if (length <= 0 or length > frame_maximum) return error.InvalidFrame;
-                const end = start + prefix + @as(usize, @intCast(length));
-                if (end > self.filled) break;
-                try self.frame(worker, self.input[start + prefix .. end]);
-                if (self.phase.load(.monotonic) == .failed) return;
-                start = end;
-                // What arrived after the encryption request is already encrypted.
-                if (self.decrypt_from) |_| {
-                    const rest = self.input[end..self.filled];
-                    self.receiving.?.transform(.decrypt, rest, rest);
-                    self.decrypt_from = null;
-                }
-            }
-            std.mem.copyForwards(u8, self.input[0 .. self.filled - start], self.input[start..self.filled]);
-            self.filled -= start;
-            if (self.filled == self.input.len) return error.FrameTooLarge;
+        const buffer = self.inputBuffer(worker);
+        assert(result > 0 and result <= buffer.len - self.filled);
+        if (self.receiving) |*cipher| {
+            const read = buffer[self.filled..][0..result];
+            cipher.transform(.decrypt, read, read);
         }
+        self.filled += result;
+
+        var start: usize = 0;
+        // The whole length of the frame left incomplete, once its length arrived.
+        var incomplete: usize = 0;
+        while (start < self.filled) {
+            const length, const prefix = readVarint(buffer[start..self.filled]) catch |err| switch (err) {
+                error.Incomplete => break,
+                else => return err,
+            };
+            if (length <= 0 or length > frame_maximum) return error.InvalidFrame;
+            const end = start + prefix + @as(usize, @intCast(length));
+            if (end > self.filled) {
+                incomplete = end - start;
+                break;
+            }
+            try self.frame(worker, buffer[start + prefix .. end]);
+            if (self.phase.load(.monotonic) == .failed) return;
+            start = end;
+            // What arrived after the encryption request is already encrypted.
+            if (self.decrypt_from) |_| {
+                const rest = buffer[end..self.filled];
+                self.receiving.?.transform(.decrypt, rest, rest);
+                self.decrypt_from = null;
+            }
+        }
+        std.mem.copyForwards(u8, buffer[0 .. self.filled - start], buffer[start..self.filled]);
+        self.filled -= start;
+        if (self.large) {
+            // It received exactly the rest of its large frame, so nothing follows it.
+            if (self.filled == 0) {
+                self.large = false;
+                worker.overflow_owner = null;
+            }
+        } else if (incomplete > self.input.len) {
+            self.frame_total = incomplete;
+            self.waiting_overflow = true;
+        }
+    }
+
+    /// Where the bot's input is.
+    fn inputBuffer(self: *const Bot, worker: *const Worker) []u8 {
+        return if (self.large) worker.overflow else self.input;
+    }
+
+    /// Where the bot receives next, or null while it waits for its worker's overflow.
+    fn receiveSpan(self: *Bot, worker: *Worker) ?[]u8 {
+        if (self.waiting_overflow) {
+            if (worker.overflow_owner != null) return null;
+            worker.overflow_owner = self.index;
+            @memcpy(worker.overflow[0..self.filled], self.input[0..self.filled]);
+            self.large = true;
+            self.waiting_overflow = false;
+        }
+        // Only the rest of the large frame, so that the overflow holds no more than it.
+        if (self.large) return worker.overflow[self.filled..self.frame_total];
+        return self.input[self.filled..];
     }
 
     fn frame(self: *Bot, worker: *Worker, raw: []const u8) !void {
@@ -737,6 +778,9 @@ const Worker = struct {
     first: usize,
     last: usize,
     decoded: []u8,
+    /// Input for the one bot at a time whose frame is larger than its own.
+    overflow: []u8,
+    overflow_owner: ?u32 = null,
     workspace: java.Wire.Workspace,
     ring: linux.IoUring,
     completions: []linux.io_uring_cqe,
@@ -797,9 +841,15 @@ const Worker = struct {
             }
 
             for (swarm.bots[self.first..self.last], self.first..) |*bot, index| {
-                if (bot.fd < 0 or bot.connect_pending) continue;
-                if (!bot.receive_pending) {
-                    _ = self.ring.recv(tag(index, .receive), bot.fd, .{ .buffer = bot.input[bot.filled..] }, 0) catch |err| {
+                if (bot.fd < 0) {
+                    // A bot that failed gives the overflow back.
+                    if (self.overflow_owner == bot.index) self.overflow_owner = null;
+                    continue;
+                }
+                if (bot.connect_pending) continue;
+                if (!bot.receive_pending) receive: {
+                    const span = bot.receiveSpan(self) orelse break :receive;
+                    _ = self.ring.recv(tag(index, .receive), bot.fd, .{ .buffer = span }, 0) catch |err| {
                         bot.fail(err, "could not receive");
                         continue;
                     };
@@ -895,7 +945,7 @@ pub const Swarm = struct {
         for (self.bots, 0..) |*bot, index| {
             bot.* = .{
                 .index = @intCast(index),
-                .input = try allocator.alloc(u8, frame_maximum + 8),
+                .input = try allocator.alloc(u8, input_capacity),
                 .output = try allocator.alloc(u8, output_capacity),
                 .random = .init(0x5eed_0000 + index),
             };
@@ -909,6 +959,7 @@ pub const Swarm = struct {
                 .first = first,
                 .last = last,
                 .decoded = try allocator.alloc(u8, decoded_maximum),
+                .overflow = try allocator.alloc(u8, frame_maximum + 8),
                 .workspace = try java.Wire.Workspace.init(allocator),
                 // Room for each bot's receive, send and connect, and the timeouts in between.
                 .ring = try linux.IoUring.init(try std.math.ceilPowerOfTwo(u16, @intCast(3 * (last - first) + 16)), 0),
