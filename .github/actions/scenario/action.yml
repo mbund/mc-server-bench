@@ -6,6 +6,12 @@ inputs:
   scenario:
     description: The script in scenarios/ to run, without its extension.
     required: true
+  terrain:
+    description: The terrain to run it on, when the script runs on more than one.
+    default: ""
+  worlds:
+    description: The world artifacts its runs start from, as a list for a download pattern.
+    required: true
 runs:
   using: composite
   steps:
@@ -15,14 +21,14 @@ runs:
         java-version: 25
     - uses: actions/download-artifact@v8
       with:
-        pattern: "{harness,terrain,import-lightning-rod,terrain-steel,build-*}"
+        pattern: "{harness,build-*,${{ inputs.worlds }}}"
         merge-multiple: true
     - shell: bash
       run: |
         # Each archive goes once unpacked, as the worlds would not all fit on the disk twice.
         for archive in *.tar.gz; do tar -xzf "$archive" && rm "$archive"; done
-        MC_SERVER_BENCH_BUILT=1 "scenarios/${{ inputs.scenario }}.sh"
+        MC_SERVER_BENCH_BUILT=1 "scenarios/${{ inputs.scenario }}.sh" ${{ inputs.terrain && format('--terrain={0}', inputs.terrain) || '' }}
     - uses: actions/upload-artifact@v7
       with:
-        name: results-${{ inputs.scenario }}
+        name: results-${{ inputs.scenario }}${{ inputs.terrain && format('-{0}', inputs.terrain) || '' }}
         path: runs/standard/results.jsonl

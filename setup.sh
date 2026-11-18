@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Builds the servers named, or every one, at its pinned version, with the bench and the worlds
-# they read. Steps already done are skipped. `terrain` builds only the worlds, which CI makes once
-# and shares between its jobs, and `bench` only the bench.
-# Usage: ./setup.sh [vanilla|lightning-rod|pumpkin|steel|paper|paper-antixray-1|fabric|fabric-occlusion|terrain|terrain-wide|import|import-wide|terrain-steel|terrain-steel-wide|bench]...
+# they read. Steps already done are skipped. `bench` builds only the bench, and the targets named
+# after a terrain only that world for one server family, which CI makes once in jobs of their own
+# and shares with the rest.
+# Usage: ./setup.sh [vanilla|lightning-rod|pumpkin|steel|paper|paper-antixray-1|fabric|fabric-occlusion|bench
+#                   |terrain-real|terrain-flat|terrain-wide|import-real|import-flat|import-wide|steel-real|steel-flat|steel-wide]...
 set -euo pipefail
 cd "$(dirname "$0")"
 # The flake's lock pins every toolchain, so local builds happen inside its shell. CI installs the
@@ -11,7 +13,7 @@ if [ -z "${MC_SERVER_BENCH_SHELL:-}" ]; then exec nix develop --command "$0" "$@
 root=$PWD
 build=$root/servers/build
 mkdir -p "$build/versions"
-targets=" ${*:-bench terrain terrain-wide vanilla lightning-rod import import-wide pumpkin steel terrain-steel terrain-steel-wide paper paper-antixray-1 fabric fabric-occlusion} "
+targets=" ${*:-bench vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion terrain-real terrain-flat terrain-wide import-real import-flat import-wide steel-real steel-flat steel-wide} "
 wants() {
   for name in "$@"; do [[ $targets == *" $name "* ]] && return 0; done
   return 1
@@ -35,7 +37,7 @@ if wants bench; then zig build -Drelease "$cpu"; fi
 # Vanilla 26.2, checked against the hash Mojang publishes. It also generates the worlds.
 jar=servers/vanilla/server.jar
 sha=823e2250d24b3ddac457a60c92a6a941943fcd6a
-if wants vanilla terrain terrain-wide paper paper-antixray-1 fabric fabric-occlusion; then
+if wants vanilla terrain-real terrain-flat terrain-wide paper paper-antixray-1 fabric fabric-occlusion; then
   if ! echo "$sha  $jar" | sha1sum --check --status 2>/dev/null; then
     mkdir -p servers/vanilla
     curl -fsSL -o "$jar" "https://piston-data.mojang.com/v1/objects/$sha/server.jar"
@@ -53,20 +55,17 @@ fi
 # seed and flat terrain, each a square of radius 64 chunks, and wide flat terrain far enough out
 # for the views of 256 players spread apart. Vanilla generates them for every server reading
 # vanilla worlds, Lightning Rod imports them, and SteelMC generates the same chunks itself, below.
-# `terrain` makes vanilla's real and flat worlds, and `terrain-wide` its wide one, which takes far
-# longer and which only spread runs on, so CI makes it apart from the others.
+# Each world is a target of its own for each that makes it, so CI makes every one in a job of its
+# own and runs on a world wait only for that world: `terrain-real`, `terrain-flat` and
+# `terrain-wide` make vanilla's.
 pregenerate() {
   [ -d "$build/worlds/$2/$1/${3:-world}" ] && return
   [ -x zig-out/bin/bench ] || zig build -Drelease "$cpu"
   ./zig-out/bin/bench pregen --server="$1" --terrain="$2"
 }
-if wants terrain; then
-  pregenerate vanilla real
-  pregenerate vanilla flat
-fi
-if wants terrain-wide; then
-  pregenerate vanilla wide
-fi
+for terrain in real flat wide; do
+  if wants "terrain-$terrain"; then pregenerate vanilla "$terrain"; fi
+done
 
 # Lightning Rod, built from its packages by the bench as a server outside its repository would be,
 # with the tool that imports vanilla worlds into it.
@@ -78,8 +77,8 @@ fi
 
 # Lightning Rod's worlds: vanilla's imported with their caches built, as vanilla saves its light
 # with the chunks, again whenever its commit changes, as another commit may read the caches of an
-# earlier import as outdated and start cold. `import` imports the real and flat worlds and
-# `import-wide` the wide one.
+# earlier import as outdated and start cold. `import-real`, `import-flat` and `import-wide` import
+# each world.
 import_world() {
   pregenerate vanilla "$1"
   local output=$build/worlds/$1/lightning-rod
@@ -88,13 +87,9 @@ import_world() {
   "$build/world-import/bin/world-import" --input "$build/worlds/$1/vanilla/world" --output "$output" --skip-unsupported --prewarm
   cp "$build/versions/lightning-rod" "$output.version"
 }
-if wants import; then
-  import_world real
-  import_world flat
-fi
-if wants import-wide; then
-  import_world wide
-fi
+for terrain in real flat wide; do
+  if wants "import-$terrain"; then import_world "$terrain"; fi
+done
 
 # Pumpkin, as its README builds it. Its generated data crate needs a deep stack to compile. Where
 # rustup manages Rust, it installs the toolchain Pumpkin names first.
@@ -126,8 +121,8 @@ if wants steel; then
 fi
 
 # SteelMC's worlds: the same squares of chunks that vanilla pregenerates for every other server,
-# generated by SteelMC into its own format, again whenever its build changes. `terrain-steel` makes
-# the real and flat worlds and `terrain-steel-wide` the wide one.
+# generated by SteelMC into its own format, again whenever its build changes. `steel-real`,
+# `steel-flat` and `steel-wide` make each world.
 steel_world() {
   local output=$build/worlds/$1/steel
   [ -d "$output" ] && cmp -s "$output.version" "$build/versions/steel" && return
@@ -135,13 +130,9 @@ steel_world() {
   pregenerate steel "$1" saves
   cp "$build/versions/steel" "$output.version"
 }
-if wants terrain-steel; then
-  steel_world real
-  steel_world flat
-fi
-if wants terrain-steel-wide; then
-  steel_world wide
-fi
+for terrain in real flat wide; do
+  if wants "steel-$terrain"; then steel_world "$terrain"; fi
+done
 
 # Paper 26.2 build 135, checked against the hash its download service publishes. Its launcher
 # patches the vanilla jar and fetches libraries once here, and every run links them.
