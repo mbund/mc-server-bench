@@ -14,7 +14,8 @@ out=runs/standard
 # The worlds runs start from, and SteelMC's own when it runs. CI builds every server and world in
 # jobs of their own and hands the scenario jobs the results.
 worlds=(terrain terrain-wide)
-if [[ " ${servers[*]} " == *" steel "* ]]; then worlds+=(terrain-steel); fi
+if [[ " ${servers[*]} " == *" lightning-rod "* ]]; then worlds+=(import import-wide); fi
+if [[ " ${servers[*]} " == *" steel "* ]]; then worlds+=(terrain-steel terrain-steel-wide); fi
 [ -n "${MC_SERVER_BENCH_BUILT:-}" ] || ./setup.sh bench "${worlds[@]}" "${servers[@]}"
 
 # Measures every server in turn with the same harness options, past any run that fails.
