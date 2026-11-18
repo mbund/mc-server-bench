@@ -58,11 +58,16 @@ pub fn main(init: std.process.Init) !void {
     }
     var settings: Settings = .{};
     for (args[2..]) |argument| try parseOption(&settings, argument);
-    // The server takes the first half of the CPUs and the bots the second, unless told otherwise.
+    // The server takes the first half of the physical cores and the bots the rest, unless told
+    // otherwise, so neither runs on the other's hyperthreads.
     const cpus = try std.Thread.getCpuCount();
     if (cpus < 2) return error.TooFewCpus;
-    if (settings.server_cpus == null) settings.server_cpus = try std.fmt.allocPrint(allocator, "0-{d}", .{cpus / 2 - 1});
-    if (settings.bot_cpus == null) settings.bot_cpus = try std.fmt.allocPrint(allocator, "{d}-{d}", .{ cpus / 2, cpus - 1 });
+    if (settings.server_cpus == null or settings.bot_cpus == null) {
+        const split = try process.splitCores(allocator, init.io, cpus);
+        if (settings.server_cpus == null) settings.server_cpus = split.server;
+        if (settings.bot_cpus == null) settings.bot_cpus = split.bots;
+    }
+    if (std.mem.eql(u8, verb, "run")) std.log.info("server cpus {s}, bot cpus {s}", .{ settings.server_cpus.?, settings.bot_cpus.? });
     if (std.mem.eql(u8, verb, "recipe")) {
         const kind = settings.server orelse return usage();
         var buffer: [4096]u8 = undefined;
