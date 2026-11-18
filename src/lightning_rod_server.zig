@@ -7,7 +7,10 @@ const profile = @import("profile");
 const protocol_set = @import("protocols");
 const sessions = @import("sessions");
 const vanilla = @import("lightning_rod_vanilla_1_21_6");
-const Chunks = @import("chunks").Chunks;
+const chunks = @import("chunks");
+const Chunks = chunks.Chunks;
+const Domains = @import("domains").domains.Domains;
+const farm = @import("farm.zig");
 const Players = @import("players").players.Players;
 const Streaming = @import("terrain").streaming.Streaming;
 const connection_plugins = @import("connection").plugins;
@@ -42,6 +45,8 @@ pub fn main(init: std.process.Init) !void {
         }),
         lightning_rod.plugin.configured(Cows, Cows.Configuration{}),
         lightning_rod.plugin.configured(Teleports, Teleports.Configuration{}),
+        lightning_rod.plugin.configured(lightning_rod.TickRate, lightning_rod.TickRate.Configuration{}),
+        lightning_rod.plugin.configured(Farm, Farm.Configuration{}),
     });
     var protocols = try protocol_set.Default.init(allocator);
     defer protocols.deinit(allocator);
@@ -75,6 +80,116 @@ pub fn main(init: std.process.Init) !void {
         .storage_path = config.world,
     }, .{});
 }
+
+/// Builds the warp scenario's farm and runs its ticks back to back, as the commands and /tick
+/// sprint do on the servers with a console: once the bench writes the farm file, it forces the
+/// farm's columns to tick, places the same blocks the fills do and the same cows, and writes
+/// that it is built; once the bench writes the warp file, it sprints that many ticks and writes
+/// how many ran.
+const Farm = struct {
+    pub const id = "mc_server_bench:farm";
+    pub const Configuration = struct {};
+    pub const Dependencies = struct { chunks: *Chunks, mobs: *vanilla.Mobs, domains: *Domains, worlds: *vanilla.VanillaWorlds, tick_rate: *lightning_rod.TickRate };
+
+    deps: Dependencies,
+    ticks: u64 = 0,
+    stage: enum { waiting, forced, built, warping, done } = .waiting,
+    warp_from: u64 = 0,
+
+    pub fn init(allocator: std.mem.Allocator, _: Configuration, deps: Dependencies) !*Farm {
+        const self = try allocator.create(Farm);
+        self.* = .{ .deps = deps };
+        return self;
+    }
+
+    pub fn tick(self: *Farm, io: std.Io) !void {
+        self.ticks += 1;
+        switch (self.stage) {
+            .waiting => {
+                if (self.ticks % 5 != 0) return;
+                std.Io.Dir.cwd().access(io, config.farm_file, .{}) catch return;
+                const world = self.deps.worlds.overworld;
+                var x = farm.chunk_min[0];
+                while (x <= farm.chunk_max[0]) : (x += 1) {
+                    var z = farm.chunk_min[1];
+                    while (z <= farm.chunk_max[1]) : (z += 1) try self.deps.domains.force(.{ .world = world, .x = x, .z = z });
+                }
+                try self.place();
+                self.stage = .forced;
+            },
+            // Cows come once the farm's columns tick, as a summon does in loaded chunks.
+            .forced => {
+                const world = self.deps.worlds.overworld;
+                var x = farm.chunk_min[0];
+                while (x <= farm.chunk_max[0]) : (x += 1) {
+                    var z = farm.chunk_min[1];
+                    while (z <= farm.chunk_max[1]) : (z += 1) if (!self.deps.domains.ticks(.{ .world = world, .x = x, .z = z })) return;
+                }
+                // As /summon does: facing south, with the spawn a mob finalizes.
+                for (0..farm.cows) |index| _ = try self.deps.mobs.spawn(.{ .species = .cow, .world = world, .position = farm.cowPosition(index), .yaw = 0 });
+                try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config.farm_built_file, .data = "built\n" });
+                self.stage = .built;
+            },
+            .built => {
+                if (self.ticks % 5 != 0) return;
+                var buffer: [32]u8 = undefined;
+                const text = std.Io.Dir.cwd().readFile(io, config.warp_file, &buffer) catch return;
+                const ticks = std.fmt.parseInt(u64, std.mem.trim(u8, text, " \n"), 10) catch return;
+                self.deps.tick_rate.sprint(ticks);
+                self.warp_from = self.ticks;
+                self.stage = .warping;
+            },
+            .warping => {
+                if (self.deps.tick_rate.sprinting()) return;
+                var buffer: [32]u8 = undefined;
+                try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = config.warped_file, .data = try std.fmt.bufPrint(&buffer, "{d}\n", .{self.ticks - self.warp_from}) });
+                self.stage = .done;
+            },
+            .done => {},
+        }
+    }
+
+    /// The farm's blocks: the ground, water and fence first, then the cane, so no cane is ever
+    /// placed without the water beside it.
+    fn place(self: *Farm) !void {
+        const world = self.deps.worlds.overworld;
+        const sand = try state("minecraft:sand");
+        const water = try state("minecraft:water[level=0]");
+        const cane = try state("minecraft:sugar_cane[age=0]");
+        for ([_]bool{ false, true }) |canes| {
+            var x = farm.block_min[0];
+            while (x <= farm.block_max[0]) : (x += 1) {
+                var z = farm.block_min[1];
+                while (z <= farm.block_max[1]) : (z += 1) {
+                    const ground: chunks.Position = .{ .x = x, .y = farm.ground_y, .z = z };
+                    const above: chunks.Position = .{ .x = x, .y = farm.cane_y, .z = z };
+                    switch (farm.cell(x, z)) {
+                        .cane => if (canes) try self.deps.chunks.setBlock(world, above, cane) else try self.deps.chunks.setBlock(world, ground, sand),
+                        .sand => if (!canes) try self.deps.chunks.setBlock(world, ground, sand),
+                        .water => if (!canes) try self.deps.chunks.setBlock(world, ground, water),
+                        .fence => if (!canes) try self.deps.chunks.setBlock(world, above, try fence(x, z)),
+                    }
+                }
+            }
+        }
+    }
+
+    /// A fence post joined to the fence beside it, as vanilla shapes one placed among others.
+    fn fence(x: i32, z: i32) !u16 {
+        const Side = struct {
+            fn joins(at_x: i32, at_z: i32) []const u8 {
+                if (at_x < farm.block_min[0] or at_x > farm.block_max[0] or at_z < farm.block_min[1] or at_z > farm.block_max[1]) return "false";
+                return if (farm.cell(at_x, at_z) == .fence) "true" else "false";
+            }
+        };
+        var buffer: [128]u8 = undefined;
+        return state(try std.fmt.bufPrint(&buffer, "minecraft:oak_fence[east={s},north={s},south={s},waterlogged=false,west={s}]", .{ Side.joins(x + 1, z), Side.joins(x, z - 1), Side.joins(x, z + 1), Side.joins(x - 1, z) }));
+    }
+
+    fn state(name: []const u8) !u16 {
+        return @intCast(protocol_set.registry.blockStateId(name) orelse return error.UnknownBlockState);
+    }
+};
 
 /// Moves players where the bench asks, as /tp does on the servers with a console: each line of
 /// the teleports file in the server's directory, a name and where, once its player is in its

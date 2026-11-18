@@ -8,6 +8,7 @@ const protocols = @import("protocols");
 const java = @import("minecraft_java");
 const scenario = @import("scenario.zig");
 const offlineUuid = @import("session_server.zig").offlineUuid;
+const farm = @import("farm.zig");
 
 const Version = protocols.version("26.2");
 const Protocol = Version.Protocol;
@@ -29,6 +30,14 @@ const tick_ns = 50 * std.time.ns_per_ms;
 pub const chunks_per_tick: f32 = 25;
 pub const entity_player = 156;
 pub const entity_cow = 30;
+
+/// Sugar cane's block in 26.2, for the warp scenario's check, set before the bots start.
+var cane_block: u16 = 0;
+
+fn isCane(state: u32) bool {
+    const blocks = Version.Registry.block_state_to_block;
+    return state < blocks.len and blocks[state] == cane_block;
+}
 pub const item_stone = 1;
 
 pub const Counter = enum {
@@ -44,6 +53,9 @@ pub const Counter = enum {
     players_seen,
     entities_seen,
     cows_seen,
+    /// Columns of the warp scenario's farm the bot found three tall, and short.
+    cane_full,
+    cane_short,
     entities_removed,
     edits,
     acks,
@@ -173,6 +185,8 @@ pub const Bot = struct {
     spawned: bool = false,
     /// Moved by the server to where its scenario starts.
     placed: bool = false,
+    /// What the warp scenario's check counted in each of the farm's chunks.
+    farm_tallies: [farm.chunks]farm.Tally = @splat(.{}),
     position: [3]f64 = @splat(0),
     yaw: f32 = 0,
     pitch: f32 = 0,
@@ -557,6 +571,16 @@ pub const Bot = struct {
             self.counters.add(.chunk_bytes, frame_bytes);
             if (self.counters.get(.chunks) == 1) self.counters.mark(.first_chunk_ns, now());
             if (self.counters.get(.chunks) == scenario.viewChunks()) self.counters.mark(.viewed_ns, now());
+            if (worker.swarm.config.kind == .warp) {
+                const tally = try farm.checkChunk(reader.rest(), isCane);
+                // The latest of a chunk sent again replaces what it counted before.
+                if (tally.chunk) |index| {
+                    const before = self.farm_tallies[index];
+                    self.farm_tallies[index] = tally;
+                    self.counters.set(.cane_full, self.counters.get(.cane_full) - before.full + tally.full);
+                    self.counters.set(.cane_short, self.counters.get(.cane_short) - before.short + tally.short);
+                }
+            }
         } else if (id == In.packetId(.chunk_batch_finished)) {
             var packet: Packet = .init(&buffer, Out.packetId(.chunk_batch_received));
             packet.int(u32, @bitCast(chunks_per_tick));
@@ -952,6 +976,8 @@ pub const Swarm = struct {
 
     pub fn init(allocator: std.mem.Allocator, config: Configuration, bots: usize, threads: usize) !*Swarm {
         assert(bots > 0 and threads > 0);
+        // Before any worker reads it.
+        if (config.kind == .warp) cane_block = Version.Registry.block_state_to_block[@intCast(Version.Registry.blockStateId("minecraft:sugar_cane[age=0]").?)];
         const self = try allocator.create(Swarm);
         const workers = @min(threads, bots);
         self.* = .{

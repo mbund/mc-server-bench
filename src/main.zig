@@ -6,6 +6,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const bot = @import("bot.zig");
 const scenario = @import("scenario.zig");
+const farm = @import("farm.zig");
 const server_module = @import("server.zig");
 const process = @import("process.zig");
 const report = @import("report.zig");
@@ -31,6 +32,8 @@ pub const Settings = struct {
     bot_cpus: ?[]const u8 = null,
     bot_threads: usize = 4,
     join_interval_ms: u64 = 200,
+    /// The longest a warp may run before it counts as unfinished.
+    warp_limit_s: u64 = 1800,
     out: []const u8 = "runs/latest",
     keep_worlds: bool = false,
     /// Whether sessions are encrypted, as on a server open to the internet. Off measures the rest
@@ -79,12 +82,15 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, verb, "run")) return usage();
     const server = settings.server orelse return usage();
     const kind = settings.scenario orelse return usage();
-    // A cows run steps through cows around one player, and every other run through players.
-    // Cows come only with the cows scenario, which always has some, and steps grow.
+    // A cows run steps through cows around one player, a warp has no steps, and every other run
+    // steps through players. Cows come only with the cows scenario, which always has some, and
+    // steps grow.
     if ((kind == .cows) != (settings.cows.len != 0)) return usage();
     const steps = if (kind == .cows) settings.cows else settings.players;
-    if (steps.len == 0 or steps[0] == 0) return usage();
-    for (steps[1..], steps[0 .. steps.len - 1]) |after, before| if (after <= before) return usage();
+    if (kind != .warp) {
+        if (steps.len == 0 or steps[0] == 0) return usage();
+        for (steps[1..], steps[0 .. steps.len - 1]) |after, before| if (after <= before) return usage();
+    }
     // Before pinning, while every CPU still counts.
     var host = try hostInfo(allocator, init.io);
     host.cores = split.cores;
@@ -98,6 +104,7 @@ pub fn main(init: std.process.Init) !void {
     if (settings.encryption) try @import("session_server.zig").start();
     const results_path = try std.fs.path.join(allocator, &.{ settings.out, "results.jsonl" });
 
+    if (kind == .warp) return measureWarp(allocator, init.io, root, settings, server, results_path, host);
     try measure(allocator, init.io, root, settings, server, kind, steps, results_path, host);
 }
 
@@ -116,10 +123,10 @@ fn usage() error{InvalidArguments} {
         \\  bench pregen [--server=vanilla|steel] [--terrain=flat|real|wide] [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate a world runs start from, or add a dimension to it
         \\servers: vanilla lightning-rod pumpkin steel paper paper-antifreecam folia fabric-optimized
-        \\scenarios: idle wander spread explore build cows
+        \\scenarios: idle wander spread explore build cows warp
         \\options: --warmup=<s> --seconds=<s> --server-cpus=<list> --bot-cpus=<list>
         \\         --bot-threads=<n> --join-interval=<ms> --out=<directory> --keep-worlds
-        \\         --dump-frames=<path prefix> --encryption=on|off
+        \\         --dump-frames=<path prefix> --encryption=on|off --warp-limit=<s>
     , .{});
     return error.InvalidArguments;
 }
@@ -154,6 +161,8 @@ fn parseOption(settings: *Settings, argument: []const u8) !void {
         settings.bot_threads = try std.fmt.parseInt(usize, value, 10);
     } else if (std.mem.eql(u8, name, "--join-interval")) {
         settings.join_interval_ms = try std.fmt.parseInt(u64, value, 10);
+    } else if (std.mem.eql(u8, name, "--warp-limit")) {
+        settings.warp_limit_s = try std.fmt.parseInt(u64, value, 10);
     } else if (std.mem.eql(u8, name, "--out")) {
         settings.out = value;
     } else if (std.mem.eql(u8, name, "--terrain")) {
@@ -320,6 +329,28 @@ pub const Result = struct {
     /// The limit this step broke, which ended the run, or empty when the server kept up.
     limit: []const u8 = "",
     samples: []const Sample = &.{},
+    /// The warp scenario's measurement, which has no steps of players.
+    warp: Warp = .{},
+};
+
+pub const Warp = struct {
+    /// Ticks the server was asked to run back to back, and how many it ran.
+    ticks: u64 = 0,
+    ran: u64 = 0,
+    /// From asking for the ticks until the game time reached them.
+    seconds: f64 = 0,
+    ms_per_tick: f64 = 0,
+    /// The server's CPU time over the warp, per tick it ran.
+    cpu_ms_per_tick: f64 = 0,
+    rss_mb_max: f64 = 0,
+    /// Building the farm and summoning its cows, before the warp.
+    build_s: f64 = 0,
+    /// What the player that joined after found: the farm's cane three tall and short, and cows.
+    cane_full: u64 = 0,
+    cane_short: u64 = 0,
+    canes: u64 = 0,
+    cows_seen: u64 = 0,
+    cows: u64 = 0,
 };
 
 pub const PacketTraffic = struct { name: []const u8, count_per_player: f64, kb_per_player: f64, decoded_kb_per_player: f64 };
@@ -416,6 +447,10 @@ const Run = struct {
 
     fn viewed(self: *Run) bool {
         return self.swarm.reached(.viewed_ns) + self.swarm.count(.failed) == self.swarm.admitted;
+    }
+
+    fn sawFarmCows(self: *Run) bool {
+        return self.swarm.total(.cows_seen) >= farm.cows;
     }
 
     fn sawCows(self: *Run) bool {
@@ -559,6 +594,149 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     try append(allocator, io, results_path, last);
     try writeJson(allocator, io, try std.fs.path.join(allocator, &.{ directory, "result.json" }), last);
     if (last.problems.len != 0) std.log.warn("the run had problems, see {s}", .{results_path});
+}
+
+/// Measures how fast a server runs ticks with no one online: it builds the farm, runs the warp's
+/// ticks back to back as /tick sprint does, then a player joins to check every cane grew three
+/// tall and every cow is there. Nothing goes over the network while the ticks run.
+fn measureWarp(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: Settings, kind: server_module.Kind, results_path: []const u8, host: Host) !void {
+    const directory = try std.fmt.allocPrint(allocator, "{s}/{s}/warp/{s}", .{ settings.out, @tagName(settings.terrain), @tagName(kind) });
+    std.Io.Dir.cwd().deleteTree(io, directory) catch {};
+    const metrics = try std.fmt.allocPrint(allocator, "/dev/shm/mc-server-bench-{d}", .{linux.getpid()});
+    std.Io.Dir.cwd().deleteTree(io, metrics) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, metrics) catch {};
+    var result: Result = .{
+        .server = @tagName(kind),
+        .version = try server_module.version(kind, allocator, io, root),
+        .host = host,
+        .terrain = @tagName(settings.terrain),
+        .scenario = "warp",
+        .encrypted = settings.encryption,
+        .players = 0,
+        .cows = farm.cows,
+        .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(),
+        .startup_s = 0,
+        .warp = .{ .ticks = farm.warp_ticks, .canes = farm.canes, .cows = farm.cows },
+    };
+    var problems: std.ArrayList([]const u8) = .empty;
+    if (!kind.warps()) {
+        result.limit = "the server cannot run ticks back to back";
+        try problems.append(allocator, result.limit);
+        result.problems = problems.items;
+        try append(allocator, io, results_path, result);
+        return;
+    }
+
+    if (bot.probe(config.port)) return error.PortInUse;
+    const launched = now();
+    const server = try Server.start(allocator, io, .{
+        .kind = kind,
+        .root = root,
+        .directory = directory,
+        .players = 1,
+        .cows = 0,
+        .cpus = settings.server_cpus.?,
+        .metrics = metrics,
+        .terrain = settings.terrain,
+        .encryption = settings.encryption,
+    });
+    var stopped = false;
+    defer if (!stopped) {
+        _ = server.stop(10) catch {};
+    };
+    while (!bot.probe(config.port)) {
+        if (server.exited.load(.acquire)) return error.ServerExited;
+        if (now() - launched > 300 * std.time.ns_per_s) return error.ServerNeverReady;
+        try io.sleep(.fromMilliseconds(100), .awake);
+    }
+    result.startup_s = seconds(now() - launched);
+    try server.configure();
+
+    std.log.info("{s} warp: building the farm", .{@tagName(kind)});
+    const build_start = now();
+    server.buildFarm(allocator) catch |err| {
+        // A server that never loads the chunks it forced, or never confirms the farm, cannot warp
+        // it, which the results say rather than leaving the server out.
+        result.limit = switch (err) {
+            error.FarmNeverLoaded => "the force loaded chunks never loaded",
+            error.FarmNotBuilt => "the server never confirmed the farm's blocks",
+            error.CowsNotSummoned => "the server never confirmed the farm's cows",
+            else => @errorName(err),
+        };
+        try problems.append(allocator, result.limit);
+        result.problems = problems.items;
+        const ending = try server.stop(180);
+        stopped = true;
+        result.stop_s = ending.seconds;
+        result.clean_stop = ending.clean;
+        try append(allocator, io, results_path, result);
+        std.log.warn("{s} warp: {s}", .{ @tagName(kind), result.limit });
+        return;
+    };
+    result.warp.build_s = seconds(now() - build_start);
+    // Lighting and the fills' block updates finish before the warp.
+    try io.sleep(.fromSeconds(5), .awake);
+
+    std.log.info("{s} warp: running {d} ticks", .{ @tagName(kind), farm.warp_ticks });
+    const first = try process.sample(server.pid);
+    var rss_max = first.rss_bytes;
+    const warp_start = now();
+    const from = try server.startWarp(allocator, farm.warp_ticks);
+    var finished = false;
+    while (!finished) {
+        if (server.exited.load(.acquire)) return error.ServerExited;
+        if (now() - warp_start > settings.warp_limit_s * std.time.ns_per_s) break;
+        try io.sleep(.fromMilliseconds(100), .awake);
+        finished = try server.warped(allocator, from, farm.warp_ticks);
+        rss_max = @max(rss_max, (try process.sample(server.pid)).rss_bytes);
+    }
+    const warp_end = now();
+    const last = try process.sample(server.pid);
+    result.warp.seconds = seconds(warp_end - warp_start);
+    result.warp.rss_mb_max = megabytes(rss_max);
+    if (finished) {
+        result.warp.ran = try server.warpTime(allocator, from);
+        result.warp.ms_per_tick = result.warp.seconds * 1000 / @as(f64, @floatFromInt(result.warp.ran));
+        result.warp.cpu_ms_per_tick = @as(f64, @floatFromInt(last.cpu_ns - first.cpu_ns)) / std.time.ns_per_ms / @as(f64, @floatFromInt(result.warp.ran));
+        std.log.info("  {d} ticks in {d:.1} s, {d:.3} ms/tick, {d:.3} cpu ms/tick", .{ result.warp.ran, result.warp.seconds, result.warp.ms_per_tick, result.warp.cpu_ms_per_tick });
+    } else {
+        result.limit = try std.fmt.allocPrint(allocator, "the ticks did not finish within {d} s", .{settings.warp_limit_s});
+        try problems.append(allocator, result.limit);
+    }
+
+    // One player joins to check the farm.
+    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = .warp, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms }, 1, 1);
+    var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched };
+    try swarm.start();
+    swarm.admit(1);
+    run.phase = "check";
+    if (!try run.wait(120, Run.joined)) try problems.append(allocator, "the player never joined to check the farm");
+    if (!try run.wait(120, Run.viewed)) try problems.append(allocator, "the player had no full view of the farm");
+    _ = try run.wait(60, Run.sawFarmCows);
+    swarm.stop();
+    result.warp.cane_full = swarm.total(.cane_full);
+    result.warp.cane_short = swarm.total(.cane_short);
+    result.warp.cows_seen = swarm.total(.cows_seen);
+    if (result.warp.cane_full != farm.canes) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{d} of {d} cane grew three tall, {d} short", .{ result.warp.cane_full, farm.canes, result.warp.cane_short }));
+    if (result.warp.cows_seen != farm.cows) try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ result.warp.cows_seen, farm.cows }));
+    for (swarm.joining()) |*each| if (each.phase.load(.acquire) == .failed)
+        try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} failed: {s} {s}", .{ each.label(), @errorName(each.failure.?), each.reasonText() }));
+    if (result.limit.len == 0 and problems.items.len != 0) result.limit = "the farm did not grow as vanilla's does";
+
+    if (!server.exited.load(.acquire)) result.peak_rss_mb = megabytes((try process.sample(server.pid)).peak_rss_bytes);
+    const ending = try server.stop(180);
+    stopped = true;
+    result.stop_s = ending.seconds;
+    result.clean_stop = ending.clean;
+    for (kind.worldPaths()) |name| {
+        const world = try std.fs.path.join(allocator, &.{ directory, name });
+        result.world_mb += megabytes(diskUsage(allocator, io, world) catch 0);
+        if (!settings.keep_worlds) std.Io.Dir.cwd().deleteTree(io, world) catch {};
+    }
+    result.problems = problems.items;
+    try append(allocator, io, results_path, result);
+    try writeJson(allocator, io, try std.fs.path.join(allocator, &.{ directory, "result.json" }), result);
+    if (result.problems.len != 0) std.log.warn("the warp had problems, see {s}", .{results_path});
 }
 
 /// One step of a run: the players up to `players` join, settle and are measured, and the step
@@ -764,7 +942,7 @@ fn check(allocator: std.mem.Allocator, swarm: *bot.Swarm, kind: scenario.Kind, p
                 try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} saw {d} of {d} other players", .{ each.label(), counters.get(.players_seen), players - 1 })),
             .spread, .build => if (counters.get(.arrived_ns) == 0) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} never reached its spot", .{each.label()})),
             // Measured when the cows were summoned, before warming up.
-            .explore, .cows => {},
+            .explore, .cows, .warp => {},
         }
         // Servers acknowledge every edit up to a sequence, often several at once, so the newest
         // acknowledged sequence must keep within a second of the newest edit sent.

@@ -100,6 +100,10 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
         std.mem.sort(u64, counts.items, {}, std.sort.asc(u64));
         try writer.print("## {s} terrain, {s}\n\n{s}\n\n", .{ terrainName(terrain), @tagName(kind), kind.description() });
         try machines(allocator, writer, runs.items, terrain, kind);
+        if (kind == .warp) {
+            try warpTable(allocator, writer, runs.items, terrain);
+            continue;
+        }
         if (counts.items.len > 1) try chartSection(allocator, io, writer, directory, charts_url, runs.items, terrain, kind, counts.items);
         try heldTable(writer, runs.items, terrain, kind);
         for (counts.items) |players| try table(writer, runs.items, terrain, kind, players);
@@ -270,6 +274,54 @@ fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writ
 
 /// How far each server went before breaking a limit: the most it kept up with, and what ended its
 /// run, or that it kept up with every step.
+/// The warp: each server's latest, the fastest first, and those that could not warp or whose
+/// farm did not grow after them.
+fn warpTable(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain) !void {
+    try writer.writeAll(
+        \\| Server | Ticks/s | ms/tick | CPU ms/tick | Seconds | Peak RSS MB | Cane grown | Cows seen | Problems |
+        \\|---|---:|---:|---:|---:|---:|---:|---:|---|
+        \\
+    );
+    var order: std.ArrayList(Object) = .empty;
+    for (std.enums.values(server_module.Kind)) |server| {
+        var found: ?Object = null;
+        for (runs) |run| {
+            if (matches(run, terrain, .warp) and std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) found = run;
+        }
+        if (found) |run| try order.append(allocator, run);
+    }
+    const Speed = struct {
+        fn key(run: Object) f64 {
+            const ms = number(run, &.{ "warp", "ms_per_tick" });
+            return if (ms == 0) std.math.inf(f64) else ms;
+        }
+        fn faster(_: void, a: Object, b: Object) bool {
+            return key(a) < key(b);
+        }
+    };
+    std.mem.sort(Object, order.items, {}, Speed.faster);
+    for (order.items) |run| {
+        const ms = number(run, &.{ "warp", "ms_per_tick" });
+        const problems = if (lookup(run, &.{"problems"})) |value| value.array.items else &.{};
+        var listed: std.ArrayList(u8) = .empty;
+        for (problems, 0..) |problem, index| {
+            if (index != 0) try listed.appendSlice(allocator, "; ");
+            try listed.appendSlice(allocator, problem.string);
+        }
+        if (ms == 0) {
+            try writer.print("| {s} | n/a | n/a | n/a | n/a | n/a | n/a | n/a | {s} |\n", .{ text(run, &.{"server"}), listed.items });
+            continue;
+        }
+        try writer.print("| {s} | {d:.0} | {d:.3} | {d:.3} | {d:.1} | {d:.0} | {d:.0} of {d:.0} | {d:.0} of {d:.0} | {s} |\n", .{
+            text(run, &.{"server"}),                 1000 / ms,                                    ms,
+            number(run, &.{ "warp", "cpu_ms_per_tick" }), number(run, &.{ "warp", "seconds" }),     number(run, &.{ "warp", "rss_mb_max" }),
+            number(run, &.{ "warp", "cane_full" }),  number(run, &.{ "warp", "canes" }),            number(run, &.{ "warp", "cows_seen" }),
+            number(run, &.{ "warp", "cows" }),       if (listed.items.len == 0) "none" else listed.items,
+        });
+    }
+    try writer.writeByte('\n');
+}
+
 fn heldTable(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind) !void {
     try writer.print(
         \\| Server | Most {s} held | Ended by |

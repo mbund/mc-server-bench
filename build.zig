@@ -41,6 +41,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lightning_rod_vanilla_1_21_6", .module = b.dependency("lightning_rod_vanilla_1_21_6", .{ .target = target, .optimize = optimize }).module("lightning_rod_vanilla_1_21_6") },
             .{ .name = "sessions", .module = b.dependency("sessions", .{ .target = target, .optimize = optimize }).module("sessions") },
             .{ .name = "chunks", .module = b.dependency("chunks", .{ .target = target, .optimize = optimize }).module("chunks") },
+            .{ .name = "domains", .module = b.dependency("domains", .{ .target = target, .optimize = optimize }).module("domains") },
             .{ .name = "connection", .module = b.dependency("connection", .{ .target = target, .optimize = optimize }).module("connection") },
             .{ .name = "players", .module = b.dependency("players", .{ .target = target, .optimize = optimize }).module("players") },
             .{ .name = "terrain", .module = b.dependency("terrain", .{ .target = target, .optimize = optimize }).module("terrain") },

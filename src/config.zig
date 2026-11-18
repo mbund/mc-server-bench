@@ -29,6 +29,13 @@ pub const cows_file = "cows";
 /// The file in Lightning Rod's directory the bench appends a line to for each player to move, a
 /// name and where, as it has no console for /tp. Its plugin reads it a few times a second.
 pub const teleports_file = "teleports";
+/// The files the bench and Lightning Rod's warp plugin talk through, in the server's directory:
+/// a request to build the farm and the plugin's answer once it stands, then a request to run
+/// some ticks back to back and the answer once they ran, holding how many.
+pub const farm_file = "farm";
+pub const farm_built_file = "farm.built";
+pub const warp_file = "warp";
+pub const warped_file = "warped";
 
 /// Blocks between neighbouring cows in `cows`: a cow's width, so neighbours stand touching and
 /// every step one takes pushes another, which tests collisions as well as ticking and sending.

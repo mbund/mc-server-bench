@@ -6,6 +6,7 @@ const linux = std.os.linux;
 const scenario = @import("scenario.zig");
 const config = @import("config.zig");
 const process = @import("process.zig");
+const farm = @import("farm.zig");
 const session = @import("session_server.zig");
 
 pub const Kind = enum {
@@ -35,6 +36,12 @@ pub const Kind = enum {
     /// patch setup.sh applies, which lets it read commands from a pipe.
     pub fn queriesTicks(kind: Kind) bool {
         return kind != .@"lightning-rod";
+    }
+
+    /// Whether the server can run ticks back to back, as vanilla's `tick sprint` does. Folia,
+    /// which ticks each region on its own, has no tick command.
+    pub fn warps(kind: Kind) bool {
+        return kind != .folia;
     }
 
     /// Everything a server stores for its worlds, relative to the server's directory.
@@ -208,6 +215,12 @@ pub const Server = struct {
     exited: std.atomic.Value(bool) = .init(false),
     /// What Lightning Rod's teleports file holds, one line a request.
     teleports: std.ArrayList(u8) = .empty,
+    /// Fills and summons the console confirmed, and the game time it last reported and how many
+    /// times it did, for the warp scenario.
+    fills: std.atomic.Value(u32) = .init(0),
+    summons: std.atomic.Value(u32) = .init(0),
+    game_time: std.atomic.Value(u64) = .init(0),
+    game_times: std.atomic.Value(u32) = .init(0),
 
     pub fn start(allocator: std.mem.Allocator, io: std.Io, options: Options) !*Server {
         try prepare(allocator, io, options);
@@ -268,6 +281,109 @@ pub const Server = struct {
             return;
         }
         try self.console(try std.fmt.bufPrint(&buffer, "tp {s} {d:.2} {d:.2} {d:.2}", .{ name, at[0], at[1], at[2] }));
+    }
+
+    /// Builds the warp scenario's farm and summons its cows, force loading its chunks first, and
+    /// returns once the server confirmed every block and cow. Lightning Rod's plugin builds the
+    /// same farm from the request file.
+    pub fn buildFarm(self: *Server, allocator: std.mem.Allocator) !void {
+        if (self.options.kind == .@"lightning-rod") {
+            try self.request(allocator, config.farm_file, "build\n");
+            try self.awaitFile(allocator, config.farm_built_file, 300);
+            return;
+        }
+        var buffer: [128]u8 = undefined;
+        try self.console(try std.fmt.bufPrint(&buffer, "forceload add {d} {d} {d} {d}", .{ farm.block_min[0], farm.block_min[1], farm.block_max[0], farm.block_max[1] }));
+        const commands = try farm.commands(allocator);
+        // The first fill fails until the chunks load, so it repeats until one is confirmed.
+        const started = now();
+        while (self.fills.load(.acquire) == 0) {
+            if (now() - started > 300 * std.time.ns_per_s) return error.FarmNeverLoaded;
+            try self.console(commands[0]);
+            _ = try self.waitUntil(&self.fills, 1, 2);
+        }
+        const before = self.fills.load(.acquire);
+        for (commands[1..]) |line| try self.console(line);
+        if (!try self.waitUntil(&self.fills, before + @as(u32, @intCast(commands.len - 1)), 300)) return error.FarmNotBuilt;
+        for (0..farm.cows) |index| {
+            const at = farm.cowPosition(index);
+            try self.console(try std.fmt.bufPrint(&buffer, "summon minecraft:cow {d:.1} {d:.1} {d:.1}", .{ at[0], at[1], at[2] }));
+        }
+        if (!try self.waitUntil(&self.summons, farm.cows, 300)) return error.CowsNotSummoned;
+    }
+
+    /// Asks the server to run `ticks` back to back, as /tick sprint does, returning the game time
+    /// it starts from, which `warped` counts from.
+    pub fn startWarp(self: *Server, allocator: std.mem.Allocator, ticks: u64) !u64 {
+        if (self.options.kind == .@"lightning-rod") {
+            try self.request(allocator, config.warp_file, try std.fmt.allocPrint(allocator, "{d}\n", .{ticks}));
+            return 0;
+        }
+        const from = try self.gameTime(30);
+        var buffer: [64]u8 = undefined;
+        try self.console(try std.fmt.bufPrint(&buffer, "tick sprint {d}", .{ticks}));
+        return from;
+    }
+
+    /// Whether the game time reached `ticks` past `from`, asking for it on the console and waiting
+    /// at most a moment for the answer, or for Lightning Rod whether its plugin said so.
+    pub fn warped(self: *Server, allocator: std.mem.Allocator, from: u64, ticks: u64) !bool {
+        if (self.options.kind == .@"lightning-rod") {
+            const path = try std.fs.path.join(allocator, &.{ self.options.directory, config.warped_file });
+            std.Io.Dir.cwd().access(self.io, path, .{}) catch return false;
+            return true;
+        }
+        return try self.gameTime(5) >= from + ticks;
+    }
+
+    /// The ticks the warp ran: the game time past `from`, or what Lightning Rod's plugin wrote.
+    pub fn warpTime(self: *Server, allocator: std.mem.Allocator, from: u64) !u64 {
+        if (self.options.kind == .@"lightning-rod") {
+            var buffer: [32]u8 = undefined;
+            const text = try std.Io.Dir.cwd().readFile(self.io, try std.fs.path.join(allocator, &.{ self.options.directory, config.warped_file }), &buffer);
+            return std.fmt.parseInt(u64, std.mem.trim(u8, text, " \n"), 10);
+        }
+        return try self.gameTime(30) - from;
+    }
+
+    /// The game time, as `time query gametime` answers.
+    fn gameTime(self: *Server, limit_s: u64) !u64 {
+        const seen = self.game_times.load(.acquire);
+        try self.console("time query gametime");
+        if (!try self.waitUntil(&self.game_times, seen + 1, limit_s)) return error.NoGameTime;
+        return self.game_time.load(.acquire);
+    }
+
+    /// Waits for a count to reach `target`, polling briefly, reporting whether it did in time.
+    fn waitUntil(self: *Server, counter: *std.atomic.Value(u32), target: u32, limit_s: u64) !bool {
+        const started = now();
+        while (counter.load(.acquire) < target) {
+            if (self.exited.load(.acquire)) return error.ServerExited;
+            if (now() - started > limit_s * std.time.ns_per_s) return false;
+            try self.io.sleep(.fromMilliseconds(5), .awake);
+        }
+        return true;
+    }
+
+    /// Writes a request file for Lightning Rod's plugins, whole and renamed, so it never reads
+    /// half of one.
+    fn request(self: *Server, allocator: std.mem.Allocator, name: []const u8, data: []const u8) !void {
+        const path = try std.fs.path.join(allocator, &.{ self.options.directory, name });
+        const pending = try std.fmt.allocPrint(allocator, "{s}.new", .{path});
+        try std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = pending, .data = data });
+        try std.Io.Dir.rename(std.Io.Dir.cwd(), pending, std.Io.Dir.cwd(), path, self.io);
+    }
+
+    /// Waits for a file Lightning Rod's plugin writes when it is done.
+    fn awaitFile(self: *Server, allocator: std.mem.Allocator, name: []const u8, limit_s: u64) !void {
+        const path = try std.fs.path.join(allocator, &.{ self.options.directory, name });
+        const started = now();
+        while (true) {
+            if (std.Io.Dir.cwd().access(self.io, path, .{})) |_| return else |_| {}
+            if (self.exited.load(.acquire)) return error.ServerExited;
+            if (now() - started > limit_s * std.time.ns_per_s) return error.PluginNeverAnswered;
+            try self.io.sleep(.fromMilliseconds(50), .awake);
+        }
     }
 
     pub fn summonCows(self: *Server, allocator: std.mem.Allocator, from: usize, to: usize, centre: [3]f64) !void {
@@ -354,6 +470,14 @@ pub const Server = struct {
     /// Reads vanilla's tick query lines: "Average time per tick: 0.2ms" and then
     /// "Percentiles: P50: 0.2ms P95: 0.2ms P99: 2.1ms".
     fn parse(self: *Server, line: []const u8) void {
+        if (std.mem.indexOf(u8, line, "Successfully filled") != null) _ = self.fills.fetchAdd(1, .release);
+        if (std.mem.indexOf(u8, line, "Summoned new") != null) _ = self.summons.fetchAdd(1, .release);
+        // 26.2 answers "The game time is 1185 tick(s)", older releases "The time is 1185".
+        if (number(line, "The game time is ") orelse number(line, "The time is ")) |time| {
+            self.game_time.store(@intFromFloat(time), .release);
+            _ = self.game_times.fetchAdd(1, .release);
+            return;
+        }
         if (number(line, "Average time per tick: ")) |mean| {
             self.pending_mean = mean;
             return;

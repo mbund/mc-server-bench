@@ -532,10 +532,22 @@ jobs:
           terrain: flat
           needs: ${{ toJSON(needs) }}
 
+  warp:
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/scenario
+        with:
+          scenario: warp
+          terrain: flat
+          needs: ${{ toJSON(needs) }}
+
   # Every scenario's results in one report, also when one of them failed. Its charts go to the
   # charts branch, a folder per run, which serves them as images the run's summary can show.
   report:
-    needs: [harness, idle-real, idle-flat, wander-real, wander-flat, spread-tiled, spread-wide, explore, build, cows]
+    needs: [harness, idle-real, idle-flat, wander-real, wander-flat, spread-tiled, spread-wide, explore, build, cows, warp]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     permissions:

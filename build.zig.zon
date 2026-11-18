@@ -14,6 +14,7 @@
         .lightning_rod_vanilla_1_21_6 = .{ .path = "servers/lightning-rod/vanilla" },
         .sessions = .{ .path = "servers/lightning-rod/sessions" },
         .chunks = .{ .path = "servers/lightning-rod/chunks" },
+        .domains = .{ .path = "servers/lightning-rod/domains" },
         .connection = .{ .path = "servers/lightning-rod/connection" },
         .players = .{ .path = "servers/lightning-rod/players" },
         .terrain = .{ .path = "servers/lightning-rod/terrain" },

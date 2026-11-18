@@ -41,6 +41,9 @@ pub const Kind = enum {
     build,
     /// One player stands at spawn among cows the server summons on a square field around them.
     cows,
+    /// No one is online while the server runs ticks back to back over a force loaded sugar cane
+    /// farm with cows on it, then one player joins to check every cane grew.
+    warp,
 
     /// What a run's count counts.
     pub fn counted(kind: Kind) []const u8 {
@@ -49,7 +52,7 @@ pub const Kind = enum {
 
     /// Whether bots must reach a place before measuring starts.
     pub fn travels(kind: Kind) bool {
-        return kind != .explore and kind != .cows;
+        return kind != .explore and kind != .cows and kind != .warp;
     }
 
     pub fn description(kind: Kind) []const u8 {
@@ -60,6 +63,7 @@ pub const Kind = enum {
             .explore => "Everyone flies back and forth across the pregenerated world at 20 blocks a second, so servers load and send terrain from disk.",
             .build => "Everyone places or breaks a block every tick at a spot of their own near spawn.",
             .cows => "One player stands at spawn while cows are summoned touching on a square spiral around them, more each step, all in view and ticking.",
+            .warp => "No one is online while the server runs 122,880 ticks back to back, as /tick sprint does, over 32 force loaded chunks of sugar cane farm with 128 cows wandering it, then a player joins to check every cane grew three tall.",
         };
     }
 };
@@ -100,7 +104,7 @@ pub fn startSpot(configuration: bot_module.Configuration, bot: *const Bot, count
         .spread => spreadSpot(bot, configuration.terrain),
         .explore => .{ bot.home()[0], cruise_altitude, bot.home()[2] },
         .build => buildTarget(bot, count),
-        .cows => null,
+        .cows, .warp => null,
     };
 }
 
@@ -118,7 +122,7 @@ fn arrive(bot: *Bot, target: [3]f64, flying: bool) !bool {
 pub fn step(configuration: bot_module.Configuration, bot: *Bot, count: usize) !void {
     switch (configuration.kind) {
         .idle => try idle(bot),
-        .cows => try still(bot),
+        .cows, .warp => try still(bot),
         .wander => try wander(bot),
         .spread => try spread(bot, configuration.terrain),
         .explore => try explore(bot),

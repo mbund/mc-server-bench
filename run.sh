@@ -5,7 +5,7 @@
 # own, and joins their results into one report.
 # Usage: ./run.sh [server]...
 source "$(dirname "$0")/scenarios/common.sh"
-for scenario in idle wander spread explore build cows; do
+for scenario in idle wander spread explore build cows warp; do
   MC_SERVER_BENCH_BUILT=1 "scenarios/$scenario.sh" "${servers[@]}"
 done
 ./zig-out/bin/bench report "$out"
