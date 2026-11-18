@@ -36,6 +36,8 @@ jobs:
       steel-real: ${{ steps.worlds.outputs.steel-real }}
       steel-flat: ${{ steps.worlds.outputs.steel-flat }}
       steel-wide: ${{ steps.worlds.outputs.steel-wide }}
+      vanilla-tiled: ${{ steps.worlds.outputs.vanilla-tiled }}
+      steel-tiled: ${{ steps.worlds.outputs.steel-tiled }}
     steps:
       - uses: actions/checkout@v7
       # Its sources, Lightning Rod's protocol packages, the toolchain and the CPU it targets.
@@ -66,7 +68,7 @@ jobs:
           key: ${{ steps.key.outputs.key }}
       - id: worlds
         run: |
-          for terrain in real flat wide; do
+          for terrain in real flat wide tiled; do
             echo "vanilla-$terrain=vanilla-$terrain-$( (./zig-out/bin/bench recipe --server=vanilla --terrain=$terrain; grep '^sha=' setup.sh; sed -n '/^pregenerate() {/,/^}/p' setup.sh) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
             echo "steel-$terrain=$( (./zig-out/bin/bench recipe --server=steel --terrain=$terrain; sed -n '/^pregenerate() {/,/^}/p; /^steel_world() {/,/^}/p' setup.sh) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
           done
@@ -263,6 +265,19 @@ jobs:
           terrain: wide
           needs: ${{ toJSON(needs) }}
 
+  terrain-tiled:
+    needs: harness
+    runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: world
+        uses: ./.github/actions/vanilla-world
+        with:
+          terrain: tiled
+          needs: ${{ toJSON(needs) }}
+
   import-real:
     needs: [terrain-real, build-lightning-rod]
     runs-on: ubuntu-26.04
@@ -302,6 +317,19 @@ jobs:
           terrain: wide
           needs: ${{ toJSON(needs) }}
 
+  import-tiled:
+    needs: [terrain-tiled, build-lightning-rod]
+    runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: world
+        uses: ./.github/actions/lightning-rod-world
+        with:
+          terrain: tiled
+          needs: ${{ toJSON(needs) }}
+
   steel-real:
     needs: [harness, build-steel]
     runs-on: ubuntu-26.04
@@ -339,6 +367,19 @@ jobs:
         uses: ./.github/actions/steel-world
         with:
           terrain: wide
+          needs: ${{ toJSON(needs) }}
+
+  steel-tiled:
+    needs: [harness, build-steel]
+    runs-on: ubuntu-26.04
+    outputs:
+      key: ${{ steps.world.outputs.key }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: world
+        uses: ./.github/actions/steel-world
+        with:
+          terrain: tiled
           needs: ${{ toJSON(needs) }}
 
   # Every scenario on each of its terrains on a machine of its own, every server in turn.
@@ -391,8 +432,8 @@ jobs:
           terrain: flat
           needs: ${{ toJSON(needs) }}
 
-  spread-real:
-    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-real, import-real, steel-real]
+  spread-tiled:
+    needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-tiled, import-tiled, steel-tiled]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
     steps:
@@ -400,7 +441,7 @@ jobs:
       - uses: ./.github/actions/scenario
         with:
           scenario: spread
-          terrain: real
+          terrain: tiled
           needs: ${{ toJSON(needs) }}
 
   spread-wide:
@@ -454,7 +495,7 @@ jobs:
   # Every scenario's results in one report, also when one of them failed. Its charts go to the
   # charts branch, a folder per run, which serves them as images the run's summary can show.
   report:
-    needs: [harness, idle-real, idle-flat, wander-real, wander-flat, spread-real, spread-wide, explore, build, cows]
+    needs: [harness, idle-real, idle-flat, wander-real, wander-flat, spread-tiled, spread-wide, explore, build, cows]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-26.04
     permissions:

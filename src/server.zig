@@ -85,13 +85,24 @@ pub const Terrain = enum {
     /// Stone and grass far enough out for the views of 256 players spread apart, which reach about
     /// 2750 blocks out.
     wide,
+    /// Vanilla's terrain from the bench's seed, structures and all, a tile a view across copied
+    /// into a grid of 23 by 23 copies, so 512 players spread apart each stream real terrain of
+    /// their own without generating a world that large.
+    tiled,
 
-    /// Chunks out from the origin that the world covers.
+    /// Chunks out from the origin that pregenerating covers. A tiled world is generated around the
+    /// origin, a forceload tile either way, and its tile copied out from there.
     pub fn radius(terrain: Terrain) i32 {
         return switch (terrain) {
             .flat, .real => 64,
             .wide => 176,
+            .tiled => 16,
         };
+    }
+
+    /// Whether the terrain is stone and grass rather than vanilla's.
+    pub fn isFlat(terrain: Terrain) bool {
+        return terrain == .flat or terrain == .wide;
     }
 
     /// Where a server's copy of the world is kept, under the bench repository.
@@ -108,7 +119,7 @@ pub const terrain_seed = "8675309";
 /// read alike, or SteelMC's worlds file. `bench recipe` prints them, and CI keys each cached world
 /// on them, so a world is generated again only when they change.
 pub fn worldSettings(allocator: std.mem.Allocator, kind: Kind, terrain: Terrain) ![]const u8 {
-    const flat = terrain != .real;
+    const flat = terrain.isFlat();
     switch (kind) {
         .vanilla, .paper, .@"paper-antixray-1", .fabric, .@"fabric-occlusion" => {
             if (!flat) return std.fmt.allocPrint(allocator, "level-seed={s}\n", .{terrain_seed});

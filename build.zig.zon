@@ -17,6 +17,9 @@
         .connection = .{ .path = "servers/lightning-rod/connection" },
         .players = .{ .path = "servers/lightning-rod/players" },
         .terrain = .{ .path = "servers/lightning-rod/terrain" },
+        // Read and rewrite region files when tiling worlds.
+        .nbt = .{ .path = "servers/lightning-rod/nbt" },
+        .deflate = .{ .path = "servers/lightning-rod/deflate" },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

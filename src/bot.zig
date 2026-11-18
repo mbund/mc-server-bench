@@ -639,6 +639,8 @@ pub const Bot = struct {
 pub const Configuration = struct {
     port: u16,
     kind: scenario.Kind,
+    /// The world the server runs, where spread lays its spots out differently on a tiled one.
+    terrain: @import("server.zig").Terrain = .flat,
     /// Time between two bots starting to join.
     join_interval_ns: u64,
     /// A file the first bot appends every frame it gets in play to, as a little endian length
@@ -678,7 +680,7 @@ const Worker = struct {
                 for (swarm.bots[self.first..self.last]) |*bot| {
                     if (bot.phase.load(.monotonic) != .play or !bot.spawned) continue;
                     bot.ping() catch |err| bot.fail(err, "ping failed");
-                    scenario.step(swarm.config.kind, bot, swarm.bots.len) catch |err| bot.fail(err, "scenario step failed");
+                    scenario.step(swarm.config, bot, swarm.bots.len) catch |err| bot.fail(err, "scenario step failed");
                     bot.ticks += 1;
                 }
                 tick += 1;

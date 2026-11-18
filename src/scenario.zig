@@ -6,6 +6,7 @@ const Bot = @import("bot.zig").Bot;
 const bot_module = @import("bot.zig");
 
 const config = @import("config.zig");
+const tile = @import("tile.zig");
 
 /// The view distance bots ask for and servers are configured with.
 pub const view_distance = config.view_distance;
@@ -90,12 +91,12 @@ test "a full view is the chunks vanilla tracks" {
     if (view_distance == 8) try std.testing.expectEqual(@as(u64, 257), viewChunks());
 }
 
-pub fn step(kind: Kind, bot: *Bot, count: usize) !void {
-    switch (kind) {
+pub fn step(configuration: bot_module.Configuration, bot: *Bot, count: usize) !void {
+    switch (configuration.kind) {
         .idle => try idle(bot),
         .cows => try still(bot),
         .wander => try wander(bot),
-        .spread => try spread(bot, count),
+        .spread => try spread(bot, configuration.terrain),
         .explore => try explore(bot),
         .build => try build(bot, count),
     }
@@ -146,10 +147,17 @@ pub fn spreadTarget(bot: *const Bot) [3]f64 {
     return .{ bot.home()[0] + @cos(angle) * radius, cruise_altitude, bot.home()[2] + @sin(angle) * radius };
 }
 
-fn spread(bot: *Bot, count: usize) !void {
-    _ = count;
+/// The bot's own spot in `spread` on a tiled world: the middle of a copy of its own, on a square
+/// spiral of copies out from the one around the origin, so its view holds only that copy.
+pub fn tiledTarget(bot: *const Bot) [3]f64 {
+    var at = config.spotPosition(bot.index, .{ 0, 0, 0 }, tile.spacing);
+    at[1] = cruise_altitude;
+    return at;
+}
+
+fn spread(bot: *Bot, terrain: @import("server.zig").Terrain) !void {
     if (!try rise(bot)) return;
-    const target = spreadTarget(bot);
+    const target = if (terrain == .tiled) tiledTarget(bot) else spreadTarget(bot);
     if (try travel(bot, target, flight_speed)) {
         // Hovering in place, as a still client does.
         if ((bot.ticks + bot.index) % 20 == 0) try bot.move(false);

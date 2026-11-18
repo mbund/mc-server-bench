@@ -926,6 +926,7 @@ test {
     _ = scenario;
     _ = server_module;
     _ = process;
+    _ = @import("tile.zig");
 }
 
 test "thread times cover the threads of a process" {

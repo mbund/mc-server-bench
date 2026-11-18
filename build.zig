@@ -9,6 +9,8 @@ pub fn build(b: *std.Build) void {
     const module = b.createModule(.{ .root_source_file = b.path("src/main.zig"), .target = target, .optimize = optimize });
     module.addImport("protocols", protocols);
     module.addImport("minecraft_java", b.dependency("minecraft_java", .{ .target = target, .optimize = optimize }).module("minecraft_java"));
+    module.addImport("nbt", b.dependency("nbt", .{ .target = target, .optimize = optimize }).module("nbt"));
+    module.addImport("deflate", b.dependency("deflate", .{ .target = target, .optimize = optimize }).module("deflate"));
     const executable = b.addExecutable(.{ .name = "bench", .root_module = module });
     b.installArtifact(executable);
 

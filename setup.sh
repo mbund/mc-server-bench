@@ -4,7 +4,7 @@
 # after a terrain only that world for one server family, which CI makes once in jobs of their own
 # and shares with the rest.
 # Usage: ./setup.sh [vanilla|lightning-rod|pumpkin|steel|paper|paper-antixray-1|fabric|fabric-occlusion|bench
-#                   |terrain-real|terrain-flat|terrain-wide|import-real|import-flat|import-wide|steel-real|steel-flat|steel-wide]...
+#                   |terrain-<terrain>|import-<terrain>|steel-<terrain>]..., with terrains real, flat, wide and tiled
 set -euo pipefail
 cd "$(dirname "$0")"
 # The flake's lock pins every toolchain, so local builds happen inside its shell. CI installs the
@@ -13,7 +13,7 @@ if [ -z "${MC_SERVER_BENCH_SHELL:-}" ]; then exec nix develop --command "$0" "$@
 root=$PWD
 build=$root/servers/build
 mkdir -p "$build/versions"
-targets=" ${*:-bench vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion terrain-real terrain-flat terrain-wide import-real import-flat import-wide steel-real steel-flat steel-wide} "
+targets=" ${*:-bench vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion terrain-real terrain-flat terrain-wide terrain-tiled import-real import-flat import-wide import-tiled steel-real steel-flat steel-wide steel-tiled} "
 wants() {
   for name in "$@"; do [[ $targets == *" $name "* ]] && return 0; done
   return 1
@@ -37,7 +37,7 @@ if wants bench; then zig build -Drelease "$cpu"; fi
 # Vanilla 26.2, checked against the hash Mojang publishes. It also generates the worlds.
 jar=servers/vanilla/server.jar
 sha=823e2250d24b3ddac457a60c92a6a941943fcd6a
-if wants vanilla terrain-real terrain-flat terrain-wide paper paper-antixray-1 fabric fabric-occlusion; then
+if wants vanilla terrain-real terrain-flat terrain-wide terrain-tiled paper paper-antixray-1 fabric fabric-occlusion; then
   if ! echo "$sha  $jar" | sha1sum --check --status 2>/dev/null; then
     mkdir -p servers/vanilla
     curl -fsSL -o "$jar" "https://piston-data.mojang.com/v1/objects/$sha/server.jar"
@@ -63,7 +63,7 @@ pregenerate() {
   [ -x zig-out/bin/bench ] || zig build -Drelease "$cpu"
   ./zig-out/bin/bench pregen --server="$1" --terrain="$2"
 }
-for terrain in real flat wide; do
+for terrain in real flat wide tiled; do
   if wants "terrain-$terrain"; then pregenerate vanilla "$terrain"; fi
 done
 
@@ -87,7 +87,7 @@ import_world() {
   "$build/world-import/bin/world-import" --input "$build/worlds/$1/vanilla/world" --output "$output" --skip-unsupported --prewarm
   cp "$build/versions/lightning-rod" "$output.version"
 }
-for terrain in real flat wide; do
+for terrain in real flat wide tiled; do
   if wants "import-$terrain"; then import_world "$terrain"; fi
 done
 
@@ -132,7 +132,7 @@ steel_world() {
   pregenerate steel "$1" saves
   cp "$build/versions/steel" "$output.version"
 }
-for terrain in real flat wide; do
+for terrain in real flat wide tiled; do
   if wants "steel-$terrain"; then steel_world "$terrain"; fi
 done
 

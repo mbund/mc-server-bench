@@ -16,6 +16,7 @@ const bot = @import("bot.zig");
 const config = @import("config.zig");
 const process = @import("process.zig");
 const server_module = @import("server.zig");
+const tiling = @import("tile.zig");
 
 const Server = server_module.Server;
 
@@ -96,6 +97,11 @@ pub fn generate(allocator: std.mem.Allocator, io: std.Io, root: []const u8, opti
     const ending = try server.stop(600);
     stopped = true;
     if (!ending.clean) return error.ServerKilled;
+    if (options.terrain == .tiled and options.dimension == null) try tiling.tile(allocator, io, directory, switch (kind) {
+        .vanilla => .vanilla,
+        .steel => .steel,
+        else => unreachable,
+    });
     return directory;
 }
 
@@ -115,15 +121,19 @@ fn quiet(io: std.Io, server: *Server) !void {
 }
 
 /// What decides the world `generate` makes for a server on a terrain, which CI keys its cached
-/// copy on: the square, the settings the server generates from, and this file, by its hash.
+/// copy on: the square, the settings the server generates from, and this file, by its hash, and
+/// for a tiled world how it is tiled.
 pub fn recipe(allocator: std.mem.Allocator, kind: server_module.Kind, terrain: server_module.Terrain) ![]const u8 {
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(@embedFile("pregen.zig"), &digest, .{});
-    return std.fmt.allocPrint(allocator, "server={s}\nterrain={s}\nradius={d}\npregen={x}\n{s}", .{
+    var tile_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = @splat(0);
+    if (terrain == .tiled) std.crypto.hash.sha2.Sha256.hash(@embedFile("tile.zig"), &tile_digest, .{});
+    return std.fmt.allocPrint(allocator, "server={s}\nterrain={s}\nradius={d}\npregen={x}\ntile={x}\n{s}", .{
         @tagName(kind),
         @tagName(terrain),
         terrain.radius(),
         digest,
+        tile_digest,
         try server_module.worldSettings(allocator, kind, terrain),
     });
 }
