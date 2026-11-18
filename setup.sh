@@ -31,7 +31,7 @@ cpu=-Dcpu=$model
 rust_cpu=-Ctarget-cpu=${model//_/-}
 
 # The bench builds against Lightning Rod's protocol packages, and so does its Lightning Rod server.
-git submodule update --init servers/lightning-rod
+if wants bench lightning-rod; then git submodule update --init servers/lightning-rod; fi
 if wants bench; then zig build -Drelease "$cpu"; fi
 
 # Vanilla 26.2, checked against the hash Mojang publishes. It also generates the worlds.
