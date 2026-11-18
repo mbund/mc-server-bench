@@ -40,6 +40,19 @@ pub fn cowPosition(index: usize, centre: [3]f64) [3]f64 {
     };
 }
 
+/// Where bot `index` stays in scenarios that give everyone a spot of their own above spawn: the
+/// same square spiral out from `centre`, `spacing` blocks apart, so no two players stand inside
+/// each other, which servers that push players apart would do every tick for bots that never move
+/// away as a client would.
+pub fn spotPosition(index: usize, centre: [3]f64, spacing: f64) [3]f64 {
+    const cell = spiral(@as(i64, @intCast(index)) + 1);
+    return .{
+        @floor(centre[0]) + 0.5 + @as(f64, @floatFromInt(cell[0])) * spacing,
+        centre[1],
+        @floor(centre[2]) + 0.5 + @as(f64, @floatFromInt(cell[1])) * spacing,
+    };
+}
+
 /// The cell of the `n`th place on a square spiral counted from 1 at the middle, ring by ring.
 fn spiral(n: i64) [2]i64 {
     if (n == 1) return .{ 0, 0 };

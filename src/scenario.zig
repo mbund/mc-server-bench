@@ -5,8 +5,10 @@ const std = @import("std");
 const Bot = @import("bot.zig").Bot;
 const bot_module = @import("bot.zig");
 
+const config = @import("config.zig");
+
 /// The view distance bots ask for and servers are configured with.
-pub const view_distance = @import("config.zig").view_distance;
+pub const view_distance = config.view_distance;
 /// Blocks per tick of creative flight and walking.
 const flight_speed = 1.0;
 const walk_speed = 0.215;
@@ -20,13 +22,15 @@ const spread_spacing = 2 * (view_distance + 1) * 16;
 const wander_radius = 24;
 /// Blocks between the spots of building bots.
 const build_spacing = 4;
+/// Blocks between the spots idle and wandering bots start from.
+const spot_spacing = 2;
 const golden_angle = std.math.pi * (3 - @sqrt(5.0));
 
 pub const Kind = enum {
-    /// Everyone stands still at spawn.
+    /// Everyone hovers still above spawn, at a spot of their own.
     idle,
     /// Everyone moves at walking speed at random near spawn, in sight of the others, in flight so
-    /// no terrain is in their way.
+    /// no terrain is in their way, from a spot of their own.
     wander,
     /// Everyone flies to a spot of their own, far from the others, and stays there.
     spread,
@@ -44,13 +48,13 @@ pub const Kind = enum {
 
     /// Whether bots must reach a place before measuring starts.
     pub fn travels(kind: Kind) bool {
-        return kind == .spread or kind == .build;
+        return kind != .explore and kind != .cows;
     }
 
     pub fn description(kind: Kind) []const u8 {
         return switch (kind) {
-            .idle => "Everyone stands still at spawn.",
-            .wander => "Everyone flies at walking speed at random within 24 blocks of spawn, in sight of each other.",
+            .idle => "Everyone flies up above spawn to a spot of their own, two blocks from the next, and hovers there.",
+            .wander => "Everyone flies up above spawn to a spot of their own, then at walking speed at random within 24 blocks of spawn, in sight of each other.",
             .spread => "Everyone flies to a spot of their own, far enough apart that views never overlap, and hovers there.",
             .explore => "Everyone flies back and forth across the pregenerated world at 20 blocks a second, so servers load and send terrain from disk.",
             .build => "Everyone places or breaks a block every tick at a spot of their own near spawn.",
@@ -88,10 +92,8 @@ test "a full view is the chunks vanilla tracks" {
 
 pub fn step(kind: Kind, bot: *Bot, count: usize) !void {
     switch (kind) {
-        .idle, .cows => {
-            // A vanilla client that does not move still reports its position once a second.
-            if ((bot.ticks + bot.index) % 20 == 0) try bot.move(false);
-        },
+        .idle => try idle(bot),
+        .cows => try still(bot),
         .wander => try wander(bot),
         .spread => try spread(bot, count),
         .explore => try explore(bot),
@@ -100,12 +102,33 @@ pub fn step(kind: Kind, bot: *Bot, count: usize) !void {
     try bot.endTick();
 }
 
+/// A vanilla client that does not move still reports its position once a second.
+fn still(bot: *Bot) !void {
+    if ((bot.ticks + bot.index) % 20 == 0) try bot.move(false);
+}
+
+/// The bot's own spot above spawn, where idle bots hover and wandering bots set out from.
+fn spot(bot: *const Bot) [3]f64 {
+    var at = config.spotPosition(bot.index, bot.home(), spot_spacing);
+    at[1] = cruise_altitude;
+    return at;
+}
+
+fn idle(bot: *Bot) !void {
+    if (!try rise(bot)) return;
+    if (try travel(bot, spot(bot), travel_speed)) try still(bot);
+}
+
 fn wander(bot: *Bot) !void {
     if (!try rise(bot)) return;
+    if (bot.counters.get(.arrived_ns) == 0) {
+        _ = try travel(bot, spot(bot), travel_speed);
+        return;
+    }
     const random = bot.random.random();
     if (bot.ticks % 40 == 0) bot.heading = random.float(f64) * std.math.tau;
-    const dx = bot.position[0] - bot.origin[0];
-    const dz = bot.position[2] - bot.origin[2];
+    const dx = bot.position[0] - bot.home()[0];
+    const dz = bot.position[2] - bot.home()[2];
     // Past the edge, head back toward spawn.
     if (dx * dx + dz * dz > wander_radius * wander_radius) bot.heading = std.math.atan2(-dz, -dx);
     bot.position[0] += @cos(bot.heading) * walk_speed;
@@ -120,7 +143,7 @@ pub fn spreadTarget(bot: *const Bot) [3]f64 {
     const index: f64 = @floatFromInt(bot.index + 1);
     const radius = @as(f64, spread_spacing) / @sqrt(std.math.pi) * @sqrt(index);
     const angle = index * golden_angle;
-    return .{ bot.origin[0] + @cos(angle) * radius, cruise_altitude, bot.origin[2] + @sin(angle) * radius };
+    return .{ bot.home()[0] + @cos(angle) * radius, cruise_altitude, bot.home()[2] + @sin(angle) * radius };
 }
 
 fn spread(bot: *Bot, count: usize) !void {
@@ -143,8 +166,8 @@ fn explore(bot: *Bot) !void {
     if (!try rise(bot)) return;
     // The heading is 0 flying out along the bot's line and pi flying back.
     var angle = @as(f64, @floatFromInt(bot.index + 1)) * golden_angle + bot.heading;
-    const dx = bot.position[0] - bot.origin[0];
-    const dz = bot.position[2] - bot.origin[2];
+    const dx = bot.position[0] - bot.home()[0];
+    const dz = bot.position[2] - bot.home()[2];
     if (dx * dx + dz * dz >= explore_reach * explore_reach and dx * @cos(angle) + dz * @sin(angle) > 0) {
         bot.heading = if (bot.heading == 0) std.math.pi else 0;
         angle += std.math.pi;
@@ -161,10 +184,11 @@ pub fn buildTarget(bot: *const Bot, count: usize) [3]f64 {
     const column: f64 = @floatFromInt(bot.index % side);
     const row: f64 = @floatFromInt(bot.index / side);
     const half: f64 = @floatFromInt(side / 2);
+    // Laid out from the spawn every bot shares, at the height of the ground the bot stands on.
     return .{
-        @floor(bot.origin[0]) + 0.5 + (column - half) * build_spacing,
+        @floor(bot.home()[0]) + 0.5 + (column - half) * build_spacing,
         bot.origin[1],
-        @floor(bot.origin[2]) + 0.5 + (row - half) * build_spacing,
+        @floor(bot.home()[2]) + 0.5 + (row - half) * build_spacing,
     };
 }
 

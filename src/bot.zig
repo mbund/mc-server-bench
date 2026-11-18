@@ -155,6 +155,9 @@ pub const Bot = struct {
     on_ground: bool = true,
     /// Where the server first put the bot.
     origin: [3]f64 = @splat(0),
+    /// The world's spawn, as the server announced it, which every bot shares, unlike where each
+    /// was put: vanilla puts joining players anywhere within ten blocks of it.
+    spawn: ?[3]f64 = null,
     /// Ticks since the bot spawned.
     ticks: u64 = 0,
     sequence: i32 = 0,
@@ -182,6 +185,12 @@ pub const Bot = struct {
     /// the swarm stops.
     setup: Traffic = .{},
     play: [256]Traffic = @splat(.{}),
+
+    /// Where scenarios lay their spots out from: the world's spawn every bot shares, or where the
+    /// bot was put if the server never said.
+    pub fn home(self: *const Bot) [3]f64 {
+        return self.spawn orelse self.origin;
+    }
 
     pub fn label(self: *const Bot) []const u8 {
         return self.name[0..self.name_len];
@@ -465,6 +474,15 @@ pub const Bot = struct {
             self.counters.set(.game_time_ns, now());
         } else if (id == In.packetId(.login)) {
             self.entity = try reader.int(i32);
+        } else if (id == In.packetId(.spawn_position)) {
+            // The dimension it is in, then the block.
+            _ = try reader.take(@intCast(try reader.varint()));
+            const at = try reader.int(i64);
+            self.spawn = .{
+                @as(f64, @floatFromInt(at >> 38)) + 0.5,
+                @floatFromInt(@as(i64, at << 52) >> 52),
+                @as(f64, @floatFromInt(@as(i64, at << 26) >> 38)) + 0.5,
+            };
         } else if (id == In.packetId(.position)) {
             try self.teleported(reader);
         } else if (id == In.packetId(.spawn_entity)) {
