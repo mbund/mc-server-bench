@@ -4,6 +4,9 @@
 const std = @import("std");
 
 pub const port: u16 = 25700;
+/// Where the bench answers for Mojang's session server, which the servers built on vanilla ask
+/// who joining players are.
+pub const session_port: u16 = port + 1;
 /// The render distance bots ask for and servers are configured with.
 pub const view_distance = 8;
 /// The distance around players that servers tick, the render distance, as no server ticks chunks

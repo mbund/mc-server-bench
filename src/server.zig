@@ -6,6 +6,7 @@ const linux = std.os.linux;
 const scenario = @import("scenario.zig");
 const config = @import("config.zig");
 const process = @import("process.zig");
+const session = @import("session_server.zig");
 
 pub const Kind = enum {
     vanilla,
@@ -384,7 +385,7 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
     const heap = try javaHeap(allocator);
     return switch (options.kind) {
         .vanilla => try allocator.dupe([]const u8, &.{
-            "java", heap, try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/vanilla/server.jar" }), "--nogui",
+            "java", heap, session.java_properties[0], session.java_properties[1], session.java_properties[2], try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/vanilla/server.jar" }), "--nogui",
         }),
         // Configured in code with the bench's settings, and takes the room for players and the cows
         // to spawn.
@@ -392,23 +393,24 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
         // Vanilla's jar unpacks where the vanilla runs unpack it, and the launcher finds its
         // libraries beside itself.
         .@"fabric-optimized" => try allocator.dupe([]const u8, &.{
-            "java", heap, try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/fabric/fabric-server-launch.jar" }), "--nogui",
+            "java", heap, session.java_properties[0], session.java_properties[1], session.java_properties[2], try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/fabric/fabric-server-launch.jar" }), "--nogui",
         }),
         // Paper converts the vanilla world it is given at every start, quickly, but first waits 30
         // seconds for its owner to stop it and make a backup, which a measured startup would count.
         .paper, .@"paper-antifreecam" => try allocator.dupe([]const u8, &.{
-            "java", heap, "-Dpaper.disableMigrationDelay=true", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/paper/paper.jar" }), "--nogui",
+            "java", heap, session.java_properties[0], session.java_properties[1], session.java_properties[2], "-Dpaper.disableMigrationDelay=true", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/paper/paper.jar" }), "--nogui",
         }),
         .folia => try allocator.dupe([]const u8, &.{
-            "java", heap, "-Dpaper.disableMigrationDelay=true", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/folia/folia.jar" }), "--nogui",
+            "java", heap, session.java_properties[0], session.java_properties[1], session.java_properties[2], "-Dpaper.disableMigrationDelay=true", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/folia/folia.jar" }), "--nogui",
         }),
         .pumpkin => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/pumpkin/target/release/pumpkin" })}),
         .steel => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/steel/target/release/steel" })}),
     };
 }
 
-/// Writes each server's settings: offline mode, creative, the same view and simulation distance,
-/// no spawn protection, no pausing when empty and room for every bot. The world is a copy of the
+/// Writes each server's settings: encrypted sessions without asking Mojang who players are,
+/// creative, the same view and simulation distance, no spawn protection, no pausing when empty and
+/// room for every bot. The world is a copy of the
 /// server's pregenerated one, unless it is generating it.
 fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     const cwd = std.Io.Dir.cwd();
@@ -427,7 +429,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "eula.txt"), .data = "eula=true\n" });
             const world = try worldSettings(allocator, options.kind, options.terrain);
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "server.properties"), .data = try std.fmt.allocPrint(allocator,
-                \\online-mode=false
+                \\online-mode={}
                 \\enforce-secure-profile=false
                 \\server-port={d}
                 \\gamemode=creative
@@ -439,6 +441,9 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\allow-flight=true
                 \\{s}
             , .{
+                // Vanilla encrypts only in online mode, checking players with the bench's session
+                // server. Generating a world needs no players.
+                !options.generating,
                 config.port, world, scenario.view_distance, config.simulation_distance, config.maxPlayers(options.players) + @as(usize, if (options.kind == .folia) folia_headroom else 0),
                 // Pregenerating loads a thousand chunks at once, and a tick waiting on them can pass
                 // the minute after which vanilla's watchdog stops the server. It is not measured,
@@ -464,7 +469,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
                 \\
                 \\[networking.java]
                 \\address = "0.0.0.0:{d}"
-                \\encryption = false
+                \\encryption = true
                 \\online_mode = false
                 \\max_players = {d}
                 \\view_distance = {d}
@@ -487,7 +492,7 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             text = try setting(allocator, text, "view_distance", try std.fmt.allocPrint(allocator, "{d}", .{scenario.view_distance}));
             text = try setting(allocator, text, "simulation_distance", try std.fmt.allocPrint(allocator, "{d}", .{config.simulation_distance}));
             text = try setting(allocator, text, "online_mode", "false");
-            text = try setting(allocator, text, "encryption", "false");
+            text = try setting(allocator, text, "encryption", "true");
             text = try setting(allocator, text, "allow_flight", "true");
             text = try setting(allocator, text, "use_favicon", "false");
             text = try setting(allocator, text, "threshold", "256");

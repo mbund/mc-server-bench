@@ -21,6 +21,13 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = module });
     b.step("test", "Test the harness").dependOn(&b.addRunArtifact(tests).step);
 
+    // The key Lightning Rod encrypts sessions with: the one its own tests use, as a bench needs
+    // no secret one.
+    const minecraft_java = b.dependency("minecraft_java", .{ .target = target, .optimize = optimize });
+    const key_files = b.addWriteFiles();
+    _ = key_files.addCopyFile(minecraft_java.path("tests/fixtures/rsa-key.der"), "rsa-key.der");
+    const key = b.createModule(.{ .root_source_file = key_files.add("key.zig", "pub const der = @embedFile(\"rsa-key.der\");\n") });
+
     // The Lightning Rod server the bench runs, built from its packages as any server outside its
     // repository would be. Its own step, so the harness builds without it.
     const server = b.addExecutable(.{ .name = "lightning_rod", .root_module = b.createModule(.{
@@ -37,6 +44,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "connection", .module = b.dependency("connection", .{ .target = target, .optimize = optimize }).module("connection") },
             .{ .name = "players", .module = b.dependency("players", .{ .target = target, .optimize = optimize }).module("players") },
             .{ .name = "terrain", .module = b.dependency("terrain", .{ .target = target, .optimize = optimize }).module("terrain") },
+            .{ .name = "minecraft_java", .module = minecraft_java.module("minecraft_java") },
+            .{ .name = "encryption_key", .module = key },
         },
     }) });
     b.step("lightning-rod", "Build the Lightning Rod server the bench runs").dependOn(&b.addInstallArtifact(server, .{}).step);

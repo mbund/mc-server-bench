@@ -7,6 +7,7 @@ const linux = std.os.linux;
 const protocols = @import("protocols");
 const java = @import("minecraft_java");
 const scenario = @import("scenario.zig");
+const offlineUuid = @import("session_server.zig").offlineUuid;
 
 const Version = protocols.version("26.2");
 const Protocol = Version.Protocol;
@@ -143,6 +144,12 @@ pub const Bot = struct {
     phase: std.atomic.Value(Phase) = .init(.waiting),
     compressed: bool = false,
     threshold: usize = 0,
+    /// The AES-CFB8 streams once the bot answered the server's encryption request, as every
+    /// server in the bench encrypts, as real servers do.
+    sending: ?java.Cipher = null,
+    receiving: ?java.Cipher = null,
+    /// Where in the input decryption starts, set as it begins mid-read.
+    decrypt_from: ?usize = null,
     input: []u8,
     filled: usize = 0,
     output: []u8,
@@ -242,6 +249,31 @@ pub const Bot = struct {
         }
         @memcpy(self.output[self.queued..][0..packet.len], packet);
         self.queued += packet.len;
+        if (self.sending) |*cipher| {
+            const framed = self.output[self.queued - header_len - length .. self.queued];
+            cipher.transform(.encrypt, framed, framed);
+        }
+        self.counters.add(.packets_out, 1);
+    }
+
+    /// Queues a packet that may reach the compression threshold, compressing it then, as a client
+    /// does. Only the encryption answer can, with a server's key of 2048 bits.
+    fn queueCompressible(self: *Bot, worker: *Worker, packet: []const u8) !void {
+        if (!self.compressed or packet.len < self.threshold) return self.queue(packet);
+        var compressed: [2048]u8 = undefined;
+        const body = try worker.workspace.compressor.encode(packet, &compressed);
+        var size: [5]u8 = undefined;
+        const size_len = putVarint(&size, @intCast(packet.len));
+        var header: [4]u8 = undefined;
+        const header_len = putVarint(&header, @intCast(size_len + body.len));
+        const length = header_len + size_len + body.len;
+        if (self.queued + length > self.output.len) return error.OutputFull;
+        const framed = self.output[self.queued..][0..length];
+        @memcpy(framed[0..header_len], header[0..header_len]);
+        @memcpy(framed[header_len..][0..size_len], size[0..size_len]);
+        @memcpy(framed[header_len + size_len ..], body);
+        if (self.sending) |*cipher| cipher.transform(.encrypt, framed, framed);
+        self.queued += length;
         self.counters.add(.packets_out, 1);
     }
 
@@ -265,6 +297,9 @@ pub const Bot = struct {
         const socket = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
         if (linux.errno(socket) != .SUCCESS) return error.SocketFailed;
         self.fd = @intCast(socket);
+        self.sending = null;
+        self.receiving = null;
+        self.decrypt_from = null;
         const one: i32 = 1;
         _ = linux.setsockopt(self.fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, std.mem.asBytes(&one), @sizeOf(i32));
         while (true) {
@@ -306,6 +341,10 @@ pub const Bot = struct {
                 else => return error.ReadFailed,
             }
             if (result == 0) return error.ConnectionClosed;
+            if (self.receiving) |*cipher| {
+                const read = self.input[self.filled..][0..result];
+                cipher.transform(.decrypt, read, read);
+            }
             self.filled += result;
             self.counters.add(.bytes_in, result);
 
@@ -321,6 +360,12 @@ pub const Bot = struct {
                 try self.frame(worker, self.input[start + prefix .. end]);
                 if (self.phase.load(.monotonic) == .failed) return;
                 start = end;
+                // What arrived after the encryption request is already encrypted.
+                if (self.decrypt_from) |_| {
+                    const rest = self.input[end..self.filled];
+                    self.receiving.?.transform(.decrypt, rest, rest);
+                    self.decrypt_from = null;
+                }
             }
             std.mem.copyForwards(u8, self.input[0 .. self.filled - start], self.input[start..self.filled]);
             self.filled -= start;
@@ -351,14 +396,14 @@ pub const Bot = struct {
         traffic.wire_bytes += raw.len;
         traffic.decoded_bytes += body.len;
         switch (self.phase.load(.monotonic)) {
-            .login => try self.loginPacket(id, &reader),
+            .login => try self.loginPacket(worker, id, &reader),
             .configuration => try self.configurationPacket(id, &reader),
             .play => try self.playPacket(id, &reader, raw.len),
             .waiting, .failed => unreachable,
         }
     }
 
-    fn loginPacket(self: *Bot, id: i32, reader: *Reader) !void {
+    fn loginPacket(self: *Bot, worker: *Worker, id: i32, reader: *Reader) !void {
         const In = Protocol.login.toClient;
         const Out = Protocol.login.toServer;
         var buffer: [256]u8 = undefined;
@@ -382,10 +427,33 @@ pub const Bot = struct {
             packet.boolean(false);
             try self.queue(packet.bytes());
         } else if (id == In.packetId(.encryption_begin)) {
-            self.fail(error.OnlineMode, "the server asked for encryption, run it in offline mode");
+            try self.encrypt(worker, reader);
         } else if (id == In.packetId(.disconnect)) {
             self.fail(error.LoginRejected, reader.rest());
         }
+    }
+
+    /// Answers the server's encryption request as a client does, without asking Mojang's session
+    /// server: the shared secret and the server's token, each encrypted with its public key.
+    /// Everything after the answer is encrypted both ways.
+    fn encrypt(self: *Bot, worker: *Worker, reader: *Reader) !void {
+        _ = try reader.string();
+        const public_key = try reader.string();
+        const token = try reader.string();
+        var secret: [16]u8 = undefined;
+        self.random.random().bytes(&secret);
+        var encrypted_secret: [rsa_bytes_maximum]u8 = undefined;
+        var encrypted_token: [rsa_bytes_maximum]u8 = undefined;
+        const secret_bytes = try rsaEncrypt(self.random.random(), public_key, &secret, &encrypted_secret);
+        const token_bytes = try rsaEncrypt(self.random.random(), public_key, token, &encrypted_token);
+        var buffer: [2 * rsa_bytes_maximum + 16]u8 = undefined;
+        var packet: Packet = .init(&buffer, Protocol.login.toServer.packetId(.encryption_begin));
+        packet.string(secret_bytes);
+        packet.string(token_bytes);
+        try self.queueCompressible(worker, packet.bytes());
+        self.sending = java.Cipher.init(secret);
+        self.receiving = java.Cipher.init(secret);
+        self.decrypt_from = 0;
     }
 
     /// What a vanilla client sends as configuration starts: its brand and settings.
@@ -889,17 +957,6 @@ pub fn probe(port: u16) bool {
 }
 
 /// The id a server in offline mode gives a name: a version 3 UUID of "OfflinePlayer:" and it.
-fn offlineUuid(name: []const u8) u128 {
-    var md5 = std.crypto.hash.Md5.init(.{});
-    md5.update("OfflinePlayer:");
-    md5.update(name);
-    var digest: [16]u8 = undefined;
-    md5.final(&digest);
-    digest[6] = (digest[6] & 0x0f) | 0x30;
-    digest[8] = (digest[8] & 0x3f) | 0x80;
-    return std.mem.readInt(u128, &digest, .big);
-}
-
 fn blockPosition(at: [3]i32) i64 {
     const x: u64 = @as(u26, @truncate(@as(u32, @bitCast(at[0]))));
     const z: u64 = @as(u26, @truncate(@as(u32, @bitCast(at[2]))));
@@ -911,6 +968,38 @@ pub fn now() u64 {
     var time: linux.timespec = undefined;
     _ = linux.clock_gettime(.MONOTONIC, &time);
     return @as(u64, @intCast(time.sec)) * std.time.ns_per_s + @as(u64, @intCast(time.nsec));
+}
+
+/// The largest RSA modulus a server may use, in bytes. Vanilla's is 1024 bits.
+const rsa_bytes_maximum = 512;
+
+/// Encrypts `message` with the RSA public key a server sent, as SubjectPublicKeyInfo, padded as
+/// PKCS #1 v1.5 says, which every server decrypts with.
+fn rsaEncrypt(random: std.Random, key: []const u8, message: []const u8, output: *[rsa_bytes_maximum]u8) ![]const u8 {
+    const der = std.crypto.Certificate.der;
+    const rsa = std.crypto.Certificate.rsa;
+    const info = try der.Element.parse(key, 0);
+    if (info.identifier.tag != .sequence) return error.InvalidPublicKey;
+    const algorithm = try der.Element.parse(key, info.slice.start);
+    const bits = try der.Element.parse(key, algorithm.slice.end);
+    if (bits.identifier.tag != .bitstring or bits.slice.end - bits.slice.start < 2 or key[bits.slice.start] != 0) return error.InvalidPublicKey;
+    const parts = try rsa.PublicKey.parseDer(key[bits.slice.start + 1 .. bits.slice.end]);
+    const public = try rsa.PublicKey.fromBytes(parts.exponent, parts.modulus);
+    const length = parts.modulus.len;
+    if (length > rsa_bytes_maximum or message.len + 11 > length) return error.InvalidPublicKey;
+    // 00 02, random nonzero padding, 00, the message.
+    var block: [rsa_bytes_maximum]u8 = undefined;
+    block[0] = 0;
+    block[1] = 2;
+    const padding = block[2 .. length - message.len - 1];
+    for (padding) |*byte| byte.* = random.intRangeAtMost(u8, 1, 255);
+    block[length - message.len - 1] = 0;
+    @memcpy(block[length - message.len .. length], message);
+    const Fe = @FieldType(rsa.PublicKey, "n").Fe;
+    const value = try Fe.fromBytes(public.n, block[0..length], .big);
+    const result = try public.n.powPublic(value, public.e);
+    try result.toBytes(output[0..length], .big);
+    return output[0..length];
 }
 
 /// A packet being written: its id, then fields in protocol encoding.
@@ -1010,11 +1099,6 @@ test "block positions pack as the protocol expects" {
     try std.testing.expectEqual(@as(i64, (@as(i64, 1) << 38) | (3 << 12) | 2), blockPosition(.{ 1, 2, 3 }));
     const negative: u64 = @bitCast(blockPosition(.{ -1, -1, -1 }));
     try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), negative);
-}
-
-test "offline ids match vanilla" {
-    // What vanilla gives "Notch" in offline mode.
-    try std.testing.expectEqual(@as(u128, 0xb50ad385829d3141a2167e7d7539ba7f), offlineUuid("Notch"));
 }
 
 test "varints round trip" {

@@ -86,6 +86,8 @@ pub fn main(init: std.process.Init) !void {
     try process.pin(settings.bot_cpus.?);
     const root = try std.process.currentPathAlloc(init.io, allocator);
     try std.Io.Dir.cwd().createDirPath(init.io, settings.out);
+    // The servers built on vanilla ask it who joining bots are, as they encrypt only in online mode.
+    try @import("session_server.zig").start();
     const results_path = try std.fs.path.join(allocator, &.{ settings.out, "results.jsonl" });
 
     try measure(allocator, init.io, root, settings, server, kind, steps, results_path, host);
@@ -927,6 +929,7 @@ test {
     _ = server_module;
     _ = process;
     _ = @import("tile.zig");
+    _ = @import("session_server.zig");
 }
 
 test "thread times cover the threads of a process" {

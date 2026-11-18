@@ -11,6 +11,8 @@ const Chunks = @import("chunks").Chunks;
 const Players = @import("players").players.Players;
 const Streaming = @import("terrain").streaming.Streaming;
 const connection_plugins = @import("connection").plugins;
+const LoginEncryption = @import("connection").session_encryption.LoginEncryption;
+const java = @import("minecraft_java");
 const config = @import("config.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
@@ -40,9 +42,15 @@ pub fn main(init: std.process.Init) !void {
     });
     var protocols = try protocol_set.Default.init(allocator);
     defer protocols.deinit(allocator);
+    // Sessions are encrypted, as on any server open to the internet, without asking Mojang who
+    // players are.
+    var key = try java.RsaPrivateKey.init(@import("encryption_key").der);
+    defer key.deinit();
     const network = lightning_rod.plugin.compose(.{
         lightning_rod.plugin.configured(protocol_set.Handshake, protocol_set.Handshake.Configuration{}),
-        connection_plugins(&protocols),
+        lightning_rod.plugin.replace(connection_plugins(&protocols), .{
+            lightning_rod.plugin.configured(LoginEncryption, LoginEncryption.Configuration{ .key = &key }),
+        }),
     });
     try profile.Server(@TypeOf(gameplay), protocol_set.Endpoint, @TypeOf(network), sessions.SingleSimulation).run(&memory, init, .{
         .plugins = gameplay,
