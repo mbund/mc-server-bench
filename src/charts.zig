@@ -127,7 +127,9 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
         try writer.print("<text class=\"t2\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"end\">{s}</text>\n", .{ left - 6, at + 4, decadeLabel(&label, @intFromFloat(decade)) });
     }
     try writer.print("<line class=\"axis\" x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke-width=\"1\"/>\n", .{ left, bottom, right, bottom });
+    var shown: [64]bool = undefined;
     for (counts, 0..) |players, index| {
+        if (!countsShown(counts, left, right, &shown)[index]) continue;
         try writer.print("<text class=\"t2\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"middle\">{d}</text>\n", .{ column(index, counts.len, left, right), bottom + 16, players });
     }
     try writer.print("<text class=\"t2\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"middle\">{s}</text>\n", .{ (left + right) / 2, bottom + 32, axis });
@@ -165,23 +167,92 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
             return a.y < b.y;
         }
     }.less);
+    // Each name in turn, from the top, moves down past every name placed before it that it would
+    // overlap, or up where that would take it below the plot, and never above the plot.
     for (labels.items, 0..) |*label, index| {
-        if (index != 0) {
-            const before = labels.items[index - 1];
-            if (before.x == label.x) label.y = @max(label.y, before.y + label_spacing);
-        }
-    }
-    // Names pushed past the bottom shift back up together.
-    var index = labels.items.len;
-    var limit = bottom + 4;
-    while (index > 0) : (index -= 1) {
-        const label = &labels.items[index - 1];
-        if (label.y > limit) label.y = limit;
-        limit = label.y - label_spacing;
+        const placed = labels.items[0..index];
+        const wanted = label.y;
+        label.y = clear(placed, label.*, wanted, label_spacing);
+        if (label.y > bottom + 4) label.y = clear(placed, label.*, wanted, -label_spacing);
+        label.y = std.math.clamp(label.y, top + 4, bottom + 4);
     }
     for (labels.items) |label| {
         try writer.print("<text class=\"t1\" x=\"{d:.1}\" y=\"{d:.1}\">{s}</text>\n", .{ label.x, label.y, @tagName(label.server) });
     }
+}
+
+/// Where a name nearest `wanted` stops overlapping every name placed, moving a line at a time
+/// down for a positive step or up for a negative one. Names overlap where their text would.
+fn clear(placed: anytype, label: anytype, wanted: f64, step: f64) f64 {
+    var y = wanted;
+    var moved = true;
+    while (moved) {
+        moved = false;
+        for (placed) |other| {
+            const apart_x = label.x >= other.x + nameWidth(other.server) or other.x >= label.x + nameWidth(label.server);
+            if (apart_x or @abs(other.y - y) >= @abs(step)) continue;
+            y = other.y + step;
+            moved = true;
+        }
+    }
+    return y;
+}
+
+fn nameWidth(server: Server) f64 {
+    return @as(f64, @floatFromInt(@tagName(server).len)) * digit_width + 4;
+}
+
+/// Width of one character of 12 pixel monospace, and the space kept between two count labels.
+const digit_width = 7.2;
+const label_gap = 6;
+
+/// Which counts below a panel are labelled: each that fits beside the last one labelled, and the
+/// last count always, dropping the one before it where they would touch. A ramp of fifteen
+/// steps leaves less room than three digits take, and every point still names its count.
+fn countsShown(counts: []const u64, left: f64, right: f64, shown: []bool) []const bool {
+    std.debug.assert(counts.len <= shown.len);
+    const result = shown[0..counts.len];
+    @memset(result, false);
+    var kept: ?usize = null;
+    for (counts, 0..) |count, index| {
+        const half = digits(count) * digit_width / 2;
+        const at = column(index, counts.len, left, right);
+        if (kept) |before| {
+            const edge = column(before, counts.len, left, right) + digits(counts[before]) * digit_width / 2 + label_gap;
+            if (at - half < edge) {
+                if (index != counts.len - 1) continue;
+                result[before] = false;
+            }
+        }
+        result[index] = true;
+        kept = index;
+    }
+    return result;
+}
+
+fn digits(count: u64) f64 {
+    var value = count;
+    var length: f64 = 1;
+    while (value >= 10) : (value /= 10) length += 1;
+    return length;
+}
+
+test "count labels never touch, and the first and last are always shown" {
+    const ramp = [_]u64{ 1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512 };
+    var shown: [64]bool = undefined;
+    const result = countsShown(&ramp, 0, 296, &shown);
+    try std.testing.expect(result[0] and result[ramp.len - 1]);
+    var previous: ?usize = null;
+    for (result, 0..) |label, index| {
+        if (!label) continue;
+        if (previous) |before| {
+            const gap_between = column(index, ramp.len, 0, 296) - column(before, ramp.len, 0, 296);
+            try std.testing.expect(gap_between >= (digits(ramp[index]) + digits(ramp[before])) * digit_width / 2 + label_gap);
+        }
+        previous = index;
+    }
+    // Two counts far apart both show.
+    try std.testing.expect(countsShown(&.{ 16, 4096 }, 0, 296, &shown)[0]);
 }
 
 fn column(index: usize, count: usize, left: f64, right: f64) f64 {
