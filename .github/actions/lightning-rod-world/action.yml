@@ -53,3 +53,7 @@ runs:
           servers/build/worlds/${{ inputs.terrain }}/lightning-rod
           servers/build/worlds/${{ inputs.terrain }}/lightning-rod.version
         key: ${{ steps.key.outputs.key }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: ./.github/actions/prune
+      with:
+        key: ${{ steps.key.outputs.key }}

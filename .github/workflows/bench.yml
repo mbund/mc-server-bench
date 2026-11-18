@@ -14,6 +14,11 @@ on:
   push:
     branches: [main]
 
+# Pruning the cache deletes entries.
+permissions:
+  contents: read
+  actions: write
+
 env:
   # The scripts run here without entering the flake's shell.
   MC_SERVER_BENCH_SHELL: 1
@@ -66,6 +71,14 @@ jobs:
         with:
           path: zig-out/bin/bench
           key: ${{ steps.key.outputs.key }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/prune
+        with:
+          key: ${{ steps.key.outputs.key }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/prune
+        with:
+          key: zig-${{ steps.key.outputs.key }}
       - id: worlds
         run: |
           for terrain in real flat wide tiled; do
@@ -121,6 +134,15 @@ jobs:
       # Once more after a pause if Maven Central turned it away, keeping what was extracted.
       - if: steps.cache.outputs.cache-hit != 'true'
         run: ./setup.sh lightning-rod || { sleep 120; ./setup.sh lightning-rod; }
+      # The compile and download caches restored above go before their new generation is saved.
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/prune
+        with:
+          key: zig-${{ steps.key.outputs.key }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/prune
+        with:
+          key: gradle-${{ steps.key.outputs.key }}
       - if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
@@ -128,6 +150,10 @@ jobs:
             servers/build/lightning-rod
             servers/build/world-import
             servers/build/versions/lightning-rod
+          key: ${{ steps.key.outputs.key }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/prune
+        with:
           key: ${{ steps.key.outputs.key }}
 
   build-pumpkin:
@@ -154,6 +180,10 @@ jobs:
           path: |
             servers/pumpkin/target/release/pumpkin
             servers/build/versions/pumpkin
+          key: ${{ steps.key.outputs.key }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/prune
+        with:
           key: ${{ steps.key.outputs.key }}
 
   build-steel:
@@ -185,6 +215,10 @@ jobs:
             servers/steel/target/release/steel
             servers/steel/package-content
             servers/build/versions/steel
+          key: ${{ steps.key.outputs.key }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/prune
+        with:
           key: ${{ steps.key.outputs.key }}
 
   # Vanilla, Paper, Paper with FPAntiFreecam, Folia and Fabric with its mods, kept for as long as
@@ -222,6 +256,10 @@ jobs:
             servers/paper
             servers/folia
             servers/fabric
+          key: ${{ steps.key.outputs.key }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/prune
+        with:
           key: ${{ steps.key.outputs.key }}
 
   # The worlds runs start from, each in a job of its own for each server family, so a run on a

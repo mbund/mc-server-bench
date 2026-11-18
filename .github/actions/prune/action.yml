@@ -1,0 +1,22 @@
+# Deletes the older generations of a cache entry, keeping the one given, so the cache holds one of
+# each thing and stays under the repository's limit. Over it, GitHub evicts what was used longest
+# ago, which can be a build a job of this run checked for and a later job still needs.
+name: Prune
+description: Delete the older generations of a cache entry
+inputs:
+  key:
+    description: The entry to keep. The others with its name and a different 20 digit hash go.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+        KEY: ${{ inputs.key }}
+      run: |
+        name=${KEY%????????????????????}
+        gh cache list --key "$name" --limit 100 --json key --jq '.[].key' | grep -E "^${name}[0-9a-f]{20}\$" | grep -vxF "$KEY" | while read -r old; do
+          gh cache delete "$old" && echo "deleted $old"
+        done || true

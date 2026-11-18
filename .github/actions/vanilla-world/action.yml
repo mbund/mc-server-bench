@@ -46,3 +46,7 @@ runs:
       with:
         path: servers/build/worlds/${{ inputs.terrain }}/vanilla
         key: ${{ fromJSON(inputs.needs).harness.outputs[format('vanilla-{0}', inputs.terrain)] }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: ./.github/actions/prune
+      with:
+        key: ${{ fromJSON(inputs.needs).harness.outputs[format('vanilla-{0}', inputs.terrain)] }}
