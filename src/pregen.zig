@@ -4,9 +4,9 @@
 //! With a dimension, the square is added to that dimension of the existing world.
 //!
 //! The worlds hold no entities: vanilla's are cleared of the animals and villagers it spawns into
-//! the chunks it generates, and of the minecarts and frames its structures place, as SteelMC,
-//! which generates its own, and Lightning Rod, which imports vanilla's, have none, while Pumpkin
-//! loads them. The cows scenario measures what mobs cost, the same cows on every server.
+//! the chunks it generates, and both servers' of the minecarts and frames their structures
+//! place, as Lightning Rod, which imports vanilla's, keeps none, while Pumpkin loads them. The
+//! cows scenario measures what mobs cost, the same cows on every server.
 //!
 //! CI keys each cached world on this file, with the settings the server generates from, so only
 //! what decides how a world is generated belongs here.
@@ -80,10 +80,10 @@ pub fn generate(allocator: std.mem.Allocator, io: std.Io, root: []const u8, opti
                 // Each chunk gets its animals as it finishes generating, here while its tile is
                 // loaded, so they go before the tiles are released. A second time for what the
                 // first left lying about: mobs' loot, the contents of mineshafts' chest minecarts.
-                if (kind == .vanilla) for (0..2) |_| {
+                for (0..2) |_| {
                     try server.console(try std.fmt.allocPrint(allocator, "{s}kill @e[type=!minecraft:player]", .{prefix}));
                     try quiet(io, server);
-                };
+                }
                 for (pending[0..pending_count]) |tile| try server.console(try std.fmt.allocPrint(allocator, "{s}forceload remove {d} {d} {d} {d}", .{ prefix, tile[0], tile[1], tile[0] + 255, tile[1] + 255 }));
                 pending_count = 0;
                 std.log.info("generated through tile {d}, {d}", .{ tile_x, tile_z });
