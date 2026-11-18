@@ -91,12 +91,14 @@ for terrain in real flat wide; do
   if wants "import-$terrain"; then import_world "$terrain"; fi
 done
 
-# Pumpkin, as its README builds it. Its generated data crate needs a deep stack to compile. Where
-# rustup manages Rust, it installs the toolchain Pumpkin names first.
+# Pumpkin, as its README builds it. Its generated data crate needs a deep stack to compile. It
+# names only the latest stable Rust, so where rustup manages Rust it builds with 1.98.0, the stable
+# release when its pinned commit was made, rather than whichever is latest on the day.
 if wants pumpkin; then
   git submodule update --init --recursive servers/pumpkin
-  if command -v rustup > /dev/null; then (cd servers/pumpkin && rustup toolchain install); fi
-  (cd servers/pumpkin && RUST_MIN_STACK=1073741824 RUSTFLAGS="$rust_cpu" cargo build --release)
+  rust=1.98.0
+  if command -v rustup > /dev/null; then rustup toolchain install --profile minimal "$rust"; fi
+  (cd servers/pumpkin && RUSTUP_TOOLCHAIN=$rust RUST_MIN_STACK=1073741824 RUSTFLAGS="$rust_cpu" cargo build --release)
   record pumpkin
 fi
 
