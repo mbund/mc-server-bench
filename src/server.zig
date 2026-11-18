@@ -370,8 +370,10 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
         .fabric, .@"fabric-occlusion" => try allocator.dupe([]const u8, &.{
             "java", "-Xmx4G", try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/fabric/fabric-server-launch.jar" }), "--nogui",
         }),
+        // Paper converts the vanilla world it is given at every start, quickly, but first waits 30
+        // seconds for its owner to stop it and make a backup, which a measured startup would count.
         .paper, .@"paper-antixray-1" => try allocator.dupe([]const u8, &.{
-            "java", "-Xmx4G", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/paper/paper.jar" }), "--nogui",
+            "java", "-Xmx4G", "-Dpaper.disableMigrationDelay=true", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/paper/paper.jar" }), "--nogui",
         }),
         .pumpkin => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/pumpkin/target/release/pumpkin" })}),
         .steel => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/steel/target/release/steel" })}),
