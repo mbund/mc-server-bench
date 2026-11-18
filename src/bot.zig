@@ -59,9 +59,9 @@ pub const Counter = enum {
     arrived_ns,
 };
 
-/// Edits a bot times at once: one a tick, so the server may take three seconds to acknowledge one
-/// before it goes untimed.
-const edit_window = 64;
+/// Actions a bot times at once: one a tick at most, so the server may take three seconds to
+/// acknowledge one before it goes untimed.
+const action_window = 64;
 
 /// Round trips, of pings or of edits, in buckets a quarter of a power of two wide in microseconds,
 /// so any percentile is within about 12% at every scale. Bots record into their own and the swarm adds
@@ -171,13 +171,16 @@ pub const Bot = struct {
     counters: Counters = .{},
     /// Round trips of pings, which vanilla answers from its network thread.
     latency: Latency = .{},
-    /// Round trips of block edits, from sending one until the server acknowledged its sequence,
-    /// which vanilla does in the player's tick after handling it.
-    edit_latency: Latency = .{},
-    /// When each of the latest edits was sent, by its sequence.
-    edit_sent_ns: [edit_window]u64 = undefined,
-    /// The highest edit sequence timed so far.
-    edit_timed: i32 = 0,
+    /// Round trips of actions, block edits and uses of the hand, from sending one until the server
+    /// acknowledged its sequence, which vanilla does in the player's tick after handling it: the
+    /// wait for a tick, the tick and what the server is still sending, the delay players feel.
+    action_latency: Latency = .{},
+    /// When each of the latest actions was sent, by its sequence.
+    action_sent_ns: [action_window]u64 = undefined,
+    /// The highest action sequence timed so far.
+    action_timed: i32 = 0,
+    /// When the bot next uses its hand.
+    action_due_ns: u64 = 0,
     /// When the bot may start joining, once the swarm admits it.
     due_ns: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
     /// What the server sent before play, and in play by packet id: as it crossed the wire,
@@ -501,11 +504,11 @@ pub const Bot = struct {
             // window are not timed, as their send times were overwritten.
             const acked: i32 = @intCast(@min(sequence, @as(u64, @intCast(self.sequence))));
             const moment = now();
-            while (self.edit_timed < acked) {
-                self.edit_timed += 1;
-                if (acked - self.edit_timed >= edit_window) continue;
-                const sent = self.edit_sent_ns[@intCast(@mod(self.edit_timed, edit_window))];
-                if (moment > sent) self.edit_latency.record((moment - sent) / std.time.ns_per_us);
+            while (self.action_timed < acked) {
+                self.action_timed += 1;
+                if (acked - self.action_timed >= action_window) continue;
+                const sent = self.action_sent_ns[@intCast(@mod(self.action_timed, action_window))];
+                if (moment > sent) self.action_latency.record((moment - sent) / std.time.ns_per_us);
             }
         } else if (id == In.packetId(.block_change) or id == In.packetId(.multi_block_change)) {
             self.counters.add(.block_changes, 1);
@@ -571,6 +574,24 @@ pub const Bot = struct {
         try self.queue(packet.bytes());
     }
 
+    /// Uses the empty hand, which vanilla acknowledges in the player's tick and otherwise ignores,
+    /// so every scenario times how long a player's action takes to be handled and heard back from,
+    /// without changing the world. About once a second, at a random moment rather than on the
+    /// bot's own tick, as a player's actions come at any moment of the server's tick: on the
+    /// bot's tick, which keeps the same rate as the server's, every action would wait the same.
+    pub fn act(self: *Bot, moment: u64) !void {
+        self.action_due_ns = moment + std.time.ns_per_s / 2 + self.random.random().uintLessThan(u64, std.time.ns_per_s);
+        self.sequence += 1;
+        self.action_sent_ns[@intCast(@mod(self.sequence, action_window))] = now();
+        var buffer: [32]u8 = undefined;
+        var packet: Packet = .init(&buffer, Protocol.play.toServer.packetId(.use_item));
+        packet.varint(0);
+        packet.varint(self.sequence);
+        packet.int(u32, @bitCast(self.yaw));
+        packet.int(u32, @bitCast(self.pitch));
+        try self.queue(packet.bytes());
+    }
+
     pub fn endTick(self: *Bot) !void {
         var buffer: [8]u8 = undefined;
         var packet: Packet = .init(&buffer, Protocol.play.toServer.packetId(.tick_end));
@@ -605,7 +626,7 @@ pub const Bot = struct {
     /// Places the held block on the top face of the block at `below`.
     pub fn place(self: *Bot, below: [3]i32) !void {
         self.sequence += 1;
-        self.edit_sent_ns[@intCast(@mod(self.sequence, edit_window))] = now();
+        self.action_sent_ns[@intCast(@mod(self.sequence, action_window))] = now();
         var buffer: [64]u8 = undefined;
         var packet: Packet = .init(&buffer, Protocol.play.toServer.packetId(.block_place));
         packet.varint(0);
@@ -624,7 +645,7 @@ pub const Bot = struct {
     /// Breaks the block at `at`, which a creative player does at the first hit.
     pub fn dig(self: *Bot, at: [3]i32) !void {
         self.sequence += 1;
-        self.edit_sent_ns[@intCast(@mod(self.sequence, edit_window))] = now();
+        self.action_sent_ns[@intCast(@mod(self.sequence, action_window))] = now();
         var buffer: [32]u8 = undefined;
         var packet: Packet = .init(&buffer, Protocol.play.toServer.packetId(.block_dig));
         packet.varint(0);
@@ -689,6 +710,13 @@ const Worker = struct {
                 if (next_tick + std.time.ns_per_s < moment) next_tick = moment + tick_ns;
             }
 
+            var next_action: u64 = std.math.maxInt(u64);
+            for (swarm.bots[self.first..self.last]) |*bot| {
+                if (bot.phase.load(.monotonic) != .play or !bot.spawned) continue;
+                if (moment >= bot.action_due_ns) bot.act(moment) catch |err| bot.fail(err, "action failed");
+                next_action = @min(next_action, bot.action_due_ns);
+            }
+
             var count: usize = 0;
             for (swarm.bots[self.first..self.last], self.first..) |*bot, index| {
                 if (bot.fd < 0) continue;
@@ -698,7 +726,7 @@ const Worker = struct {
                 self.owners[count] = @intCast(index);
                 count += 1;
             }
-            const wake = @min(next_tick, next_join);
+            const wake = @min(@min(next_tick, next_join), next_action);
             const later = now();
             const timeout: i32 = if (wake <= later) 0 else @intCast(@min(50, (wake - later + std.time.ns_per_ms - 1) / std.time.ns_per_ms));
             const ready = linux.poll(self.descriptors.ptr, count, timeout);
@@ -783,12 +811,12 @@ pub const Swarm = struct {
     }
 
     /// Every bot's round trips of one kind added up.
-    pub fn latency(self: *const Swarm, comptime kind: enum { ping, edit }) [Latency.buckets]u64 {
+    pub fn latency(self: *const Swarm, comptime kind: enum { ping, action }) [Latency.buckets]u64 {
         var sum: [Latency.buckets]u64 = @splat(0);
         for (self.bots) |*each| {
             const counts = switch (kind) {
                 .ping => &each.latency.counts,
-                .edit => &each.edit_latency.counts,
+                .action => &each.action_latency.counts,
             };
             for (&sum, counts) |*summed, *value| summed.* += value.load(.monotonic);
         }
