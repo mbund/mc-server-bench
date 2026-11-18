@@ -3,7 +3,7 @@
 # they read. Steps already done are skipped. `bench` builds only the bench, and the targets named
 # after a terrain only that world for one server family, which CI makes once in jobs of their own
 # and shares with the rest.
-# Usage: ./setup.sh [vanilla|lightning-rod|pumpkin|steel|paper|paper-antixray-1|fabric|fabric-occlusion|bench
+# Usage: ./setup.sh [vanilla|lightning-rod|pumpkin|steel|paper|paper-antifreecam|folia|fabric-optimized|bench
 #                   |terrain-<terrain>|import-<terrain>|steel-<terrain>]..., with terrains real, flat, wide and tiled
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -13,7 +13,7 @@ if [ -z "${MC_SERVER_BENCH_SHELL:-}" ]; then exec nix develop --command "$0" "$@
 root=$PWD
 build=$root/servers/build
 mkdir -p "$build/versions"
-targets=" ${*:-bench vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion terrain-real terrain-flat terrain-wide terrain-tiled import-real import-flat import-wide import-tiled steel-real steel-flat steel-wide steel-tiled} "
+targets=" ${*:-bench vanilla lightning-rod pumpkin steel paper paper-antifreecam folia fabric-optimized terrain-real terrain-flat terrain-wide terrain-tiled import-real import-flat import-wide import-tiled steel-real steel-flat steel-wide steel-tiled} "
 wants() {
   for name in "$@"; do [[ $targets == *" $name "* ]] && return 0; done
   return 1
@@ -37,7 +37,7 @@ if wants bench; then zig build -Drelease "$cpu"; fi
 # Vanilla 26.2, checked against the hash Mojang publishes. It also generates the worlds.
 jar=servers/vanilla/server.jar
 sha=823e2250d24b3ddac457a60c92a6a941943fcd6a
-if wants vanilla terrain-real terrain-flat terrain-wide terrain-tiled paper paper-antixray-1 fabric fabric-occlusion; then
+if wants vanilla terrain-real terrain-flat terrain-wide terrain-tiled paper paper-antifreecam folia fabric-optimized; then
   if ! echo "$sha  $jar" | sha1sum --check --status 2>/dev/null; then
     mkdir -p servers/vanilla
     curl -fsSL -o "$jar" "https://piston-data.mojang.com/v1/objects/$sha/server.jar"
@@ -136,22 +136,8 @@ for terrain in real flat wide tiled; do
   if wants "steel-$terrain"; then steel_world "$terrain"; fi
 done
 
-# Paper 26.2 build 135, checked against the hash its download service publishes. Its launcher
-# patches the vanilla jar and fetches libraries once here, and every run links them.
-if wants paper paper-antixray-1; then
-  paper=servers/paper/paper.jar
-  paper_sha=ef3dbc68b013deafdbbee3bebf1ba351671ebcda94a8f136809b7532d5ba2fe1
-  if ! echo "$paper_sha  $paper" | sha256sum --check --status 2>/dev/null; then
-    mkdir -p servers/paper
-    curl -fsSL -o "$paper" "https://fill-data.papermc.io/v1/objects/$paper_sha/paper-26.2-135.jar"
-    echo "$paper_sha  $paper" | sha256sum --check
-  fi
-  [ -d servers/paper/versions ] || (cd servers/paper && java -Dpaperclip.patchonly=true -jar paper.jar)
-fi
-
-# Fabric Loader 0.20.1 from its installer, checked against the hash Fabric's Maven publishes, and
-# the mods pinned to their Modrinth releases for 26.2 and checked against Modrinth's hashes.
-# Downloads a list of `file url sha512` lines into a directory.
+# Downloads a list of `file url sha512` lines into a directory, each checked against the hash
+# Modrinth publishes.
 fetch_mods() {
   mkdir -p "$1"
   while read -r file url sha; do
@@ -161,7 +147,39 @@ fetch_mods() {
     fi
   done
 }
-if wants fabric fabric-occlusion; then
+
+# Paper and Folia, Paper's fork that ticks regions of the world on threads of their own, from
+# PaperMC's download service, checked against the hash it publishes. Their launchers patch the
+# vanilla jar and fetch libraries once here, and every run links them.
+paper_family() {
+  local jar=servers/$1/$1.jar
+  if ! echo "$3  $jar" | sha256sum --check --status 2>/dev/null; then
+    mkdir -p "servers/$1"
+    curl -fsSL -o "$jar" "https://fill-data.papermc.io/v1/objects/$3/$1-26.2-$2.jar"
+    echo "$3  $jar" | sha256sum --check
+  fi
+  [ -d "servers/$1/versions" ] || (cd "servers/$1" && java -Dpaperclip.patchonly=true -jar "$1.jar")
+}
+# Paper 26.2 build 135.
+if wants paper paper-antifreecam; then
+  paper_family paper 135 ef3dbc68b013deafdbbee3bebf1ba351671ebcda94a8f136809b7532d5ba2fe1
+fi
+# Paper with FPAntiFreecam 1.5.3.1, which sends each player only what it can see, and PacketEvents
+# 2.14.0, which it needs, pinned to their Modrinth releases.
+if wants paper-antifreecam; then
+  fetch_mods servers/paper/plugins-antifreecam <<'PLUGINS'
+FPAntiFreeCam-1.5.31.jar https://cdn.modrinth.com/data/NodGIhss/versions/XKBQ5cRO/FPAntiFreeCam-1.5.31.jar 3156c73943a8758007425375582314f1d810f3766c32f33cc73ce9724c3e9adc2e093da4e210e8d1f31709795a310eba72bc2126f2efc19f08f4d42e2bdf3322
+packetevents-spigot-2.14.0.jar https://cdn.modrinth.com/data/HYKaKraK/versions/m78nFxYg/packetevents-spigot-2.14.0.jar 18a942cb55f64783a63b28deea2cebbbe782e5d6a1089f6700430e183bfbce0a45398a640ed0dff4361b55190dcf47017f2ca7788f4a5c8c9efad1f549a63fe3
+PLUGINS
+fi
+# Folia 26.2 build 7, its newest for 26.2.
+if wants folia; then
+  paper_family folia 7 128a634192261cd38bb4a5dc54075018a0f896fd6c6f529e37dca6e99e32b3b3
+fi
+
+# Fabric Loader 0.20.1 from its installer, checked against the hash Fabric's Maven publishes, and
+# the mods pinned to their Modrinth releases for 26.2.
+if wants fabric-optimized; then
   mkdir -p servers/fabric
   installer=servers/fabric/fabric-installer-1.1.2.jar
   if ! echo "74685b5a0178c4dabd4be741a276d35c59b5ec96  $installer" | sha1sum --check --status 2>/dev/null; then
@@ -169,29 +187,10 @@ if wants fabric fabric-occlusion; then
     echo "74685b5a0178c4dabd4be741a276d35c59b5ec96  $installer" | sha1sum --check
   fi
   [ -f servers/fabric/fabric-server-launch.jar ] || java -jar "$installer" server -mcversion 26.2 -loader 0.20.1 -dir servers/fabric
-  fetch_mods servers/fabric/mods <<'EOF'
+  fetch_mods servers/fabric/mods <<'MODS'
 ferritecore-9.0.0-fabric.jar https://cdn.modrinth.com/data/uXXizFIs/versions/d5ddUdiB/ferritecore-9.0.0-fabric.jar d81fa97e11784c19d42f89c2f433831d007603dd7193cee45fa177e4a6a9c52b384b198586e04a0f7f63cd996fed713322578bde9a8db57e1188854ae5cbe584
 lithium-fabric-0.25.3+mc26.2.jar https://cdn.modrinth.com/data/gvQqBUqZ/versions/f7vZ0VWU/lithium-fabric-0.25.3%2Bmc26.2.jar 148b638f3c6229fbaf487120a2344a0af5e411a5aa6533d5db9d75da0a8c0d8304f63eb4cca13f4d03b2c9b4c23d559dd74c1d832422ef8a3087bd005e62a8bd
 ScalableLux-fabric-0.3.0-alpha.0.3-all.jar https://cdn.modrinth.com/data/Ps1zyz6x/versions/EKLUURiy/ScalableLux-fabric-0.3.0-alpha.0.3-all.jar ea1551c8728a726f6ee82fed3040af52791943ef99f6b63428ed770797f60677e0160975ad59ad0f51bcd4a4ec2b5da39c6913ab2379f2e25d2397132d469a94
 krypton-0.3.1.jar https://cdn.modrinth.com/data/fQEb0iXm/versions/5WeL0Nkz/krypton-0.3.1.jar b8d9af34cd0050493afb8a6232cb8f785daa9d8887b7045f6e6a53c6bb9b5ffc4318fd9b0347a940eacfeba4773f10cb80ae0be1e79ce4c1888f96eda21e564e
-EOF
-fi
-
-# Fabric with Occlusion: the same mods, Fabric API, which Occlusion needs, and Occlusion itself.
-# Occlusion has a release only for 26.3, so it builds from its pinned source with the patch that
-# ports it to the 26.2 names.
-if wants fabric-occlusion; then
-  mods=servers/fabric/mods-occlusion
-  mkdir -p "$mods"
-  cp servers/fabric/mods/*.jar "$mods/"
-  fetch_mods "$mods" <<'EOF'
-fabric-api-0.161.0+26.2.jar https://cdn.modrinth.com/data/P7dR8mSH/versions/ewUK83HI/fabric-api-0.161.0%2B26.2.jar 2502fa5ade78e9a120b3747bc1a9a2167d6671743bea45bf115d3174c94121aeda87c549446d1a604a9c11fb828de17a551e3514ce42f3e93069dd14bdaee55b
-EOF
-  if [ ! -f "$mods/panda-occlusion-1.0.0+26.2.jar" ]; then
-    git submodule update --init servers/occlusion
-    patch=$root/patches/occlusion-26.2.patch
-    git -C servers/occlusion apply --reverse --check "$patch" 2>/dev/null || git -C servers/occlusion apply "$patch"
-    (cd servers/occlusion && ./gradlew --no-daemon -q build -x test)
-    cp servers/occlusion/build/libs/panda-occlusion-1.0.0+26.2.jar "$mods/"
-  fi
+MODS
 fi

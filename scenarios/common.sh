@@ -15,7 +15,7 @@ for argument in "$@"; do
     *) servers+=("$argument") ;;
   esac
 done
-[ ${#servers[@]} -ne 0 ] || servers=(vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion)
+[ ${#servers[@]} -ne 0 ] || servers=(vanilla lightning-rod pumpkin steel paper paper-antifreecam folia fabric-optimized)
 out=runs/standard
 # The worlds runs start from, Lightning Rod's and SteelMC's own when they run. CI builds every
 # server and world in jobs of its own and hands the scenario jobs the results.

@@ -105,7 +105,7 @@ fn usage() error{InvalidArguments} {
         \\                                    print what decides the world pregen makes, which CI keys it on
         \\  bench pregen [--server=vanilla|steel] [--terrain=flat|real|wide] [--radius=<chunks>] [--dimension=<name>]
         \\                                    generate a world runs start from, or add a dimension to it
-        \\servers: vanilla lightning-rod pumpkin steel paper paper-antixray-1 fabric fabric-occlusion
+        \\servers: vanilla lightning-rod pumpkin steel paper paper-antifreecam folia fabric-optimized
         \\scenarios: idle wander spread explore build cows
         \\options: --warmup=<s> --seconds=<s> --server-cpus=<list> --bot-cpus=<list>
         \\         --bot-threads=<n> --join-interval=<ms> --out=<directory> --keep-worlds
@@ -462,7 +462,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     defer if (dump) |fd| {
         _ = linux.close(fd);
     };
-    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump }, if (counting_cows) 1 else most, settings.bot_threads);
+    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump }, if (counting_cows) 1 else most, settings.bot_threads);
     var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched };
     try swarm.start();
     var swarm_stopped = false;
@@ -1001,7 +1001,7 @@ fn bots(allocator: std.mem.Allocator, io: std.Io, settings: Settings) !void {
         std.log.err("nothing is listening on port {d}", .{settings.port});
         return error.NothingListening;
     }
-    const swarm = try bot.Swarm.init(allocator, .{ .port = settings.port, .kind = kind, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms }, players, settings.bot_threads);
+    const swarm = try bot.Swarm.init(allocator, .{ .port = settings.port, .kind = kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms }, players, settings.bot_threads);
     try swarm.start();
     defer swarm.stop();
     swarm.admit(players);

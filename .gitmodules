@@ -7,6 +7,3 @@
 [submodule "servers/steel"]
 	path = servers/steel
 	url = https://github.com/Steel-Foundation/SteelMC
-[submodule "servers/occlusion"]
-	path = servers/occlusion
-	url = https://github.com/TreeOfSelf/PandaOcclusion

@@ -6,3 +6,4 @@ servers/paper/
 servers/fabric/
 servers/build/
 zig-pkg/
+servers/folia/

@@ -53,6 +53,7 @@ runs:
         path: |
           servers/vanilla
           servers/paper
+          servers/folia
           servers/fabric
         key: ${{ fromJSON(inputs.needs).build-java.outputs.key }}
         fail-on-cache-miss: true

@@ -187,8 +187,8 @@ jobs:
             servers/build/versions/steel
           key: ${{ steps.key.outputs.key }}
 
-  # Vanilla, Paper and Fabric, with Occlusion built from its patched source, kept for as long as
-  # their parts of setup.sh, Occlusion's commit and its patch stay the same.
+  # Vanilla, Paper, Paper with FPAntiFreecam, Folia and Fabric with its mods, kept for as long as
+  # their parts of setup.sh, from vanilla's jar to the end, stay the same.
   build-java:
     runs-on: ubuntu-26.04
     outputs:
@@ -196,13 +196,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - id: key
-        run: echo "key=java-$( (git rev-parse HEAD:servers/occlusion; awk '/^# Vanilla 26.2/,/^fi$/; /^# Paper 26.2/,/^fi$/; /^fetch_mods\(\) \{/,/^fi$/; /^if wants fabric-occlusion; then/,/^fi$/' setup.sh; cat patches/occlusion-26.2.patch) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
+        run: echo "key=java-$( (awk '/^# Vanilla 26.2/,/^fi$/' setup.sh; sed -n '/^# Downloads a list of/,$p' setup.sh) | sha256sum | cut -c1-20)" >> "$GITHUB_OUTPUT"
       - id: cache
         uses: actions/cache/restore@v5
         with:
           path: |
             servers/vanilla
             servers/paper
+            servers/folia
             servers/fabric
           key: ${{ steps.key.outputs.key }}
           lookup-only: true
@@ -212,13 +213,14 @@ jobs:
           distribution: temurin
           java-version: 25
       - if: steps.cache.outputs.cache-hit != 'true'
-        run: ./setup.sh vanilla paper paper-antixray-1 fabric fabric-occlusion
+        run: ./setup.sh vanilla paper paper-antifreecam folia fabric-optimized
       - if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: |
             servers/vanilla
             servers/paper
+            servers/folia
             servers/fabric
           key: ${{ steps.key.outputs.key }}
 

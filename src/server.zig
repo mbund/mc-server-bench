@@ -12,23 +12,18 @@ pub const Kind = enum {
     @"lightning-rod",
     pumpkin,
     steel,
-    /// Paper as shipped, with anti-xray off.
+    /// Paper as shipped.
     paper,
-    /// Paper with anti-xray replacing ores enclosed by solid blocks with stone.
-    @"paper-antixray-1",
+    /// Paper with FPAntiFreecam, which sends each player only the blocks and entities it can see.
+    @"paper-antifreecam",
+    /// Folia, Paper's fork that ticks regions of the world apart on threads of their own.
+    folia,
     /// Fabric with the mods servers commonly run for performance: FerriteCore for memory, Lithium
     /// for game logic, ScalableLux for light and Krypton for networking.
-    fabric,
-    /// Fabric with the same mods and Occlusion, which sends caves and ores out of sight as stone
-    /// and withholds entities out of sight, ported to 26.2 by setup.sh. It needs Fabric API.
-    @"fabric-occlusion",
+    @"fabric-optimized",
 
     pub fn isPaper(kind: Kind) bool {
-        return kind == .paper or kind == .@"paper-antixray-1";
-    }
-
-    pub fn isFabric(kind: Kind) bool {
-        return kind == .fabric or kind == .@"fabric-occlusion";
+        return kind == .paper or kind == .@"paper-antifreecam" or kind == .folia;
     }
 
     pub fn stopsFromConsole(kind: Kind) bool {
@@ -44,7 +39,7 @@ pub const Kind = enum {
     /// Everything a server stores for its worlds, relative to the server's directory.
     pub fn worldPaths(kind: Kind) []const []const u8 {
         return switch (kind) {
-            .vanilla, .pumpkin, .paper, .@"paper-antixray-1", .fabric, .@"fabric-occlusion" => &.{"world"},
+            .vanilla, .pumpkin, .paper, .@"paper-antifreecam", .folia, .@"fabric-optimized" => &.{"world"},
             // Lightning Rod keeps its chunk cache and write ahead log beside the world.
             .@"lightning-rod" => &.{ "world", "world.cache", "world.wal" },
             .steel => &.{"saves"},
@@ -58,9 +53,10 @@ pub const Kind = enum {
 pub fn version(kind: Kind, allocator: std.mem.Allocator, io: std.Io, root: []const u8) ![]const u8 {
     switch (kind) {
         .vanilla => return "26.2",
-        .paper, .@"paper-antixray-1" => return "26.2 build 135",
-        .fabric => return "26.2, Fabric Loader 0.20.1, FerriteCore 9.0.0, Lithium 0.25.3, ScalableLux 0.3.0-alpha.0.3, Krypton 0.3.1",
-        .@"fabric-occlusion" => return "26.2, Fabric Loader 0.20.1, FerriteCore 9.0.0, Lithium 0.25.3, ScalableLux 0.3.0-alpha.0.3, Krypton 0.3.1, Fabric API 0.161.0, Occlusion 1.0.0 ported to 26.2",
+        .paper => return "26.2 build 135",
+        .@"paper-antifreecam" => return "26.2 build 135, FPAntiFreecam 1.5.3.1, PacketEvents 2.14.0",
+        .folia => return "26.2 build 7",
+        .@"fabric-optimized" => return "26.2, Fabric Loader 0.20.1, FerriteCore 9.0.0, Lithium 0.25.3, ScalableLux 0.3.0-alpha.0.3, Krypton 0.3.1",
         .@"lightning-rod", .pumpkin, .steel => {},
     }
     const path = try std.fmt.allocPrint(allocator, "{s}/servers/build/versions/{s}", .{ root, @tagName(kind) });
@@ -121,7 +117,7 @@ pub const terrain_seed = "8675309";
 pub fn worldSettings(allocator: std.mem.Allocator, kind: Kind, terrain: Terrain) ![]const u8 {
     const flat = terrain.isFlat();
     switch (kind) {
-        .vanilla, .paper, .@"paper-antixray-1", .fabric, .@"fabric-occlusion" => {
+        .vanilla, .paper, .@"paper-antifreecam", .folia, .@"fabric-optimized" => {
             if (!flat) return std.fmt.allocPrint(allocator, "level-seed={s}\n", .{terrain_seed});
             var escaped: std.ArrayList(u8) = .empty;
             for (flat_layers_json) |byte| {
@@ -238,7 +234,7 @@ pub const Server = struct {
     /// Settings only a console sets, sent once the server is ready and before anyone joins.
     pub fn configure(self: *Server) !void {
         switch (self.options.kind) {
-            .vanilla, .pumpkin, .paper, .@"paper-antixray-1", .fabric, .@"fabric-occlusion" => {
+            .vanilla, .pumpkin, .paper, .@"paper-antifreecam", .folia, .@"fabric-optimized" => {
                 // No natural spawning on any server, so mobs come only from scenarios.
                 try self.console("gamerule spawn_mobs false");
                 // Everyone spawns on the same block, as on the servers without a spawn radius.
@@ -389,13 +385,16 @@ fn command(allocator: std.mem.Allocator, options: Options) ![]const []const u8 {
         .@"lightning-rod" => try allocator.dupe([]const u8, &.{ try std.fs.path.join(allocator, &.{ root, "servers/build/lightning-rod/bin/lightning_rod" }), try std.fmt.allocPrint(allocator, "{d}", .{config.maxPlayers(options.players)}), try std.fmt.allocPrint(allocator, "{d}", .{options.cows}) }),
         // Vanilla's jar unpacks where the vanilla runs unpack it, and the launcher finds its
         // libraries beside itself.
-        .fabric, .@"fabric-occlusion" => try allocator.dupe([]const u8, &.{
+        .@"fabric-optimized" => try allocator.dupe([]const u8, &.{
             "java", heap, try std.fmt.allocPrint(allocator, "-DbundlerRepoDir={s}/servers/vanilla/bundle", .{root}), "-jar", try std.fs.path.join(allocator, &.{ root, "servers/fabric/fabric-server-launch.jar" }), "--nogui",
         }),
         // Paper converts the vanilla world it is given at every start, quickly, but first waits 30
         // seconds for its owner to stop it and make a backup, which a measured startup would count.
-        .paper, .@"paper-antixray-1" => try allocator.dupe([]const u8, &.{
+        .paper, .@"paper-antifreecam" => try allocator.dupe([]const u8, &.{
             "java", heap, "-Dpaper.disableMigrationDelay=true", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/paper/paper.jar" }), "--nogui",
+        }),
+        .folia => try allocator.dupe([]const u8, &.{
+            "java", heap, "-Dpaper.disableMigrationDelay=true", "-jar", try std.fs.path.join(allocator, &.{ root, "servers/folia/folia.jar" }), "--nogui",
         }),
         .pumpkin => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/pumpkin/target/release/pumpkin" })}),
         .steel => try allocator.dupe([]const u8, &.{try std.fs.path.join(allocator, &.{ root, "servers/steel/target/release/steel" })}),
@@ -416,9 +415,9 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     // Where vanilla's pregenerated world is, which every server reading vanilla worlds copies.
     const vanilla_world = try path(allocator, options.root, try path(allocator, try options.terrain.directory(allocator, "vanilla"), "world"));
     switch (options.kind) {
-        .vanilla, .paper, .@"paper-antixray-1", .fabric, .@"fabric-occlusion" => {
+        .vanilla, .paper, .@"paper-antifreecam", .folia, .@"fabric-optimized" => {
             if (options.kind.isPaper()) try preparePaper(allocator, io, options);
-            if (options.kind.isFabric()) try prepareFabric(allocator, io, options);
+            if (options.kind == .@"fabric-optimized") try prepareFabric(allocator, io, options);
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "eula.txt"), .data = "eula=true\n" });
             const world = try worldSettings(allocator, options.kind, options.terrain);
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "server.properties"), .data = try std.fmt.allocPrint(allocator,
@@ -495,50 +494,39 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     }
 }
 
-/// Copies a directory tree, sharing extents where the filesystem can.
-/// Links the vanilla jar Paper patched and the libraries it fetched in setup, which it would
-/// otherwise rebuild in every fresh directory, and writes its anti-xray settings. Paper fills in
-/// every setting left out.
+/// Links what setup.sh made for a Paper server, which it would otherwise rebuild in every fresh
+/// directory: the vanilla jar its launcher patched, the libraries it fetched, and for Paper with
+/// FPAntiFreecam the plugin. Paper fills in every setting left out.
 fn preparePaper(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     const cwd = std.Io.Dir.cwd();
+    const install = try std.fs.path.join(allocator, &.{ options.root, if (options.kind == .folia) "servers/folia" else "servers/paper" });
     for ([_][]const u8{ "cache", "libraries", "versions" }) |name| {
-        const target = try std.fs.path.join(allocator, &.{ options.root, "servers/paper", name });
+        const target = try std.fs.path.join(allocator, &.{ install, name });
         cwd.access(io, target, .{}) catch return error.MissingPaperSetup;
         try cwd.symLink(io, target, try std.fs.path.join(allocator, &.{ options.directory, name }), .{ .is_directory = true });
     }
-    const anti_xray = switch (options.kind) {
-        .paper => return,
-        // The overworld settings Paper's anti-xray guide recommends for each mode.
-        .@"paper-antixray-1" =>
-        \\anticheat:
-        \\  anti-xray:
-        \\    enabled: true
-        \\    engine-mode: 1
-        \\    max-block-height: 64
-        \\    update-radius: 2
-        \\    lava-obscures: false
-        \\    use-permission: false
-        \\    hidden-blocks: [chest, coal_ore, deepslate_coal_ore, copper_ore, deepslate_copper_ore, raw_copper_block, diamond_ore, deepslate_diamond_ore, emerald_ore, deepslate_emerald_ore, gold_ore, deepslate_gold_ore, iron_ore, deepslate_iron_ore, raw_iron_block, lapis_ore, deepslate_lapis_ore, redstone_ore, deepslate_redstone_ore]
-        \\    replacement-blocks: []
-        \\
-        ,
-        else => unreachable,
-    };
-    const config_directory = try std.fs.path.join(allocator, &.{ options.directory, "config" });
-    try cwd.createDirPath(io, config_directory);
-    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ config_directory, "paper-world-defaults.yml" }), .data = anti_xray });
+    if (options.kind == .@"paper-antifreecam") {
+        const plugins = try std.fs.path.join(allocator, &.{ install, "plugins-antifreecam" });
+        cwd.access(io, plugins, .{}) catch return error.MissingPaperSetup;
+        // A directory of its own, as plugins write their settings beside themselves.
+        const directory = try std.fs.path.join(allocator, &.{ options.directory, "plugins" });
+        try cwd.createDirPath(io, directory);
+        for ([_][]const u8{ "FPAntiFreeCam-1.5.31.jar", "packetevents-spigot-2.14.0.jar" }) |jar|
+            try cwd.symLink(io, try std.fs.path.join(allocator, &.{ plugins, jar }), try std.fs.path.join(allocator, &.{ directory, jar }), .{});
+    }
 }
 
-/// Links the mods setup.sh fetched for this server and points the launcher at the vanilla jar the
-/// vanilla runs use.
+/// Links the mods setup.sh fetched and points the launcher at the vanilla jar the vanilla runs
+/// use.
 fn prepareFabric(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
     const cwd = std.Io.Dir.cwd();
-    const mods = try std.fs.path.join(allocator, &.{ options.root, if (options.kind == .fabric) "servers/fabric/mods" else "servers/fabric/mods-occlusion" });
+    const mods = try std.fs.path.join(allocator, &.{ options.root, "servers/fabric/mods" });
     cwd.access(io, mods, .{}) catch return error.MissingFabricSetup;
     try cwd.symLink(io, mods, try std.fs.path.join(allocator, &.{ options.directory, "mods" }), .{ .is_directory = true });
     try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ options.directory, "fabric-server-launcher.properties" }), .data = try std.fmt.allocPrint(allocator, "serverJar={s}/servers/vanilla/server.jar\n", .{options.root}) });
 }
 
+/// Copies a directory tree, sharing extents where the filesystem can.
 fn copy(allocator: std.mem.Allocator, io: std.Io, from: []const u8, to: []const u8) !void {
     std.Io.Dir.cwd().access(io, from, .{}) catch return error.MissingPregeneratedWorld;
     const result = try std.process.run(allocator, io, .{ .argv = &.{ "cp", "-r", "--reflink=auto", from, to } });
