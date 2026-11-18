@@ -3,6 +3,11 @@
 //! reading vanilla worlds starts from, and SteelMC, which reads none, the same chunks in its own.
 //! With a dimension, the square is added to that dimension of the existing world.
 //!
+//! The worlds hold no entities: vanilla's are cleared of the animals and villagers it spawns into
+//! the chunks it generates, and of the minecarts and frames its structures place, as SteelMC,
+//! which generates its own, and Lightning Rod, which imports vanilla's, have none, while Pumpkin
+//! loads them. The cows scenario measures what mobs cost, the same cows on every server.
+//!
 //! CI keys each cached world on this file, with the settings the server generates from, so only
 //! what decides how a world is generated belongs here.
 
@@ -51,6 +56,8 @@ pub fn generate(allocator: std.mem.Allocator, io: std.Io, root: []const u8, opti
         if (server.exited.load(.acquire)) return error.ServerExited;
         try io.sleep(.fromMilliseconds(200), .awake);
     }
+    // No mobs spawn on their own while it generates. Runs turn off spawning themselves.
+    if (kind == .vanilla) try server.console("gamerule spawn_mobs false");
     // Forceload takes at most 256 chunks a command, so the square goes in tiles of 16 by 16.
     const tiles = @divFloor((options.radius orelse options.terrain.radius()) + 15, 16);
     // Tiles forced at once: each batch waits for generation to quiet, which the wide world would
@@ -70,6 +77,13 @@ pub fn generate(allocator: std.mem.Allocator, io: std.Io, root: []const u8, opti
             pending_count += 1;
             if (pending_count == batch or (tile_x == tiles - 1 and tile_z == tiles - 1)) {
                 try quiet(io, server);
+                // Each chunk gets its animals as it finishes generating, here while its tile is
+                // loaded, so they go before the tiles are released. A second time for what the
+                // first left lying about: mobs' loot, the contents of mineshafts' chest minecarts.
+                if (kind == .vanilla) for (0..2) |_| {
+                    try server.console(try std.fmt.allocPrint(allocator, "{s}kill @e[type=!minecraft:player]", .{prefix}));
+                    try quiet(io, server);
+                };
                 for (pending[0..pending_count]) |tile| try server.console(try std.fmt.allocPrint(allocator, "{s}forceload remove {d} {d} {d} {d}", .{ prefix, tile[0], tile[1], tile[0] + 255, tile[1] + 255 }));
                 pending_count = 0;
                 std.log.info("generated through tile {d}, {d}", .{ tile_x, tile_z });
