@@ -183,6 +183,8 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
 /// Where a name nearest `wanted` stops overlapping every name placed, moving a line at a time
 /// down for a positive step or up for a negative one. Names overlap where their text would.
 fn clear(placed: anytype, label: anytype, wanted: f64, step: f64) f64 {
+    // A height that is not finite never stops overlapping, and would move forever.
+    std.debug.assert(std.math.isFinite(wanted) and step != 0);
     var y = wanted;
     var moved = true;
     while (moved) {
@@ -190,7 +192,11 @@ fn clear(placed: anytype, label: anytype, wanted: f64, step: f64) f64 {
         for (placed) |other| {
             const apart_x = label.x >= other.x + nameWidth(other.server) or other.x >= label.x + nameWidth(label.server);
             if (apart_x or @abs(other.y - y) >= @abs(step)) continue;
-            y = other.y + step;
+            // A name a step from another can measure a hair under a step apart, which moves it
+            // to where it already is. That is no move, or it would loop forever.
+            const next = other.y + step;
+            if (next == y) continue;
+            y = next;
             moved = true;
         }
     }
@@ -402,4 +408,17 @@ fn marker(writer: *std.Io.Writer, shape: usize, x: f64, y: f64, color: []const u
     } else {
         try writer.print("<rect class=\"ring\" x=\"{d:.1}\" y=\"{d:.1}\" width=\"10\" height=\"10\" fill=\"{s}\" stroke-width=\"2\"/>", .{ x - 5, y - 5, color });
     }
+}
+
+test "a name exactly a step below another settles there" {
+    const Placed = struct { server: Server, x: f64, y: f64 };
+    // As a report met them: the label a step below vanilla measures 12.9999 from it.
+    const placed = [_]Placed{
+        .{ .server = .@"paper-antifreecam", .x = 224, .y = 462.39046183929696 },
+        .{ .server = .pumpkin, .x = 298, .y = 481.7895210772604 },
+        .{ .server = .@"fabric-optimized", .x = 298, .y = 494.7895210772604 },
+        .{ .server = .vanilla, .x = 298, .y = 507.7895210772604 },
+    };
+    const label: Placed = .{ .server = .steel, .x = 298, .y = 482.49453581814566 };
+    try std.testing.expectEqual(@as(f64, 507.7895210772604 + 13), clear(&placed, label, label.y, 13));
 }
