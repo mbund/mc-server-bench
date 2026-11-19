@@ -32,6 +32,8 @@ pub const Settings = struct {
     bot_cpus: ?[]const u8 = null,
     bot_threads: usize = 4,
     join_interval_ms: u64 = 200,
+    /// The longest a step waits for its players to hold their views before it counts as a limit.
+    view_limit_s: u64 = 60,
     /// The longest a warp may run before it counts as unfinished.
     warp_limit_s: u64 = 1800,
     out: []const u8 = "runs/latest",
@@ -314,6 +316,11 @@ pub const Result = struct {
     join_s: f64 = 0,
     /// The median time from a bot entering play to it holding a full view.
     view_s: f64 = 0,
+    /// From each new player's arrival where its scenario starts to it holding the view there,
+    /// the median and the slowest, and how long the step waited for all of them.
+    arrival_view_s: f64 = 0,
+    arrival_view_max_s: f64 = 0,
+    settle_s: f64 = 0,
     travel_s: f64 = 0,
     window: Window = .{},
     peak_rss_mb: f64 = 0,
@@ -394,6 +401,50 @@ const Run = struct {
     last_sample_ns: u64 = 0,
     last_query_ns: u64 = 0,
     cows: usize = 0,
+    /// The step's new players, from `move_from`, and which the server was asked to move.
+    moved: []bool = &.{},
+    move_from: usize = 0,
+    move_error: ?anyerror = null,
+
+    /// Moves each new player to where its scenario starts as soon as it joined and the server
+    /// handled its first action, so players arrive a join apart, as joining ones do, the same
+    /// for every server. Pumpkin kicks a player confirming its join position after a later
+    /// move, and the first action is sent after that confirmation. True once each is moved or
+    /// failed.
+    fn joinedAndMoved(self: *Run) bool {
+        const swarm = self.swarm;
+        var done = true;
+        for (swarm.bots[self.move_from..swarm.admitted], self.moved) |*each, *moved| {
+            if (moved.* or each.phase.load(.acquire) == .failed) continue;
+            if (each.counters.get(.spawned_ns) == 0) {
+                done = false;
+                continue;
+            }
+            const spot = scenario.startSpot(swarm.config, each, swarm.bots.len) orelse {
+                moved.* = true;
+                continue;
+            };
+            if (each.counters.get(.acked_sequence) == 0) {
+                done = false;
+                continue;
+            }
+            self.server.teleport(self.allocator, each.label(), spot) catch |err| {
+                self.move_error = err;
+                return true;
+            };
+            moved.* = true;
+        }
+        return done;
+    }
+
+    /// Whether every player moved holds the whole view around where it was moved to.
+    fn placedViews(self: *Run) bool {
+        for (self.swarm.joining()) |*each| {
+            if (each.phase.load(.acquire) == .failed or each.counters.get(.placed_ns) == 0) continue;
+            if (each.counters.get(.placed_view_ns) == 0) return false;
+        }
+        return true;
+    }
 
     /// Samples once a second until a condition holds or a limit passes.
     fn wait(self: *Run, limit_s: u64, comptime done: ?fn (*Run) bool) !bool {
@@ -434,17 +485,6 @@ const Run = struct {
 
     fn joined(self: *Run) bool {
         return self.swarm.reached(.spawned_ns) + self.swarm.count(.failed) == self.swarm.admitted;
-    }
-
-    /// Whether the server handled every bot's first action, sent after it confirmed where it
-    /// joined, so the server is no longer waiting on that confirmation, which Pumpkin kicks a
-    /// player for confirming after another move.
-    fn settled(self: *Run) bool {
-        var count: usize = 0;
-        for (self.swarm.bots[0..self.swarm.admitted]) |*each| {
-            if (each.counters.get(.acked_sequence) > 0 or each.phase.load(.acquire) == .failed) count += 1;
-        }
-        return count == self.swarm.admitted;
     }
 
     fn viewed(self: *Run) bool {
@@ -759,7 +799,12 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     swarm.admit(players);
 
     run.phase = "join";
-    if (!try run.wait(newcomers * settings.join_interval_ms / 1000 + 120, Run.joined)) try problems.append(allocator, "not every bot joined in time");
+    run.moved = try allocator.alloc(bool, newcomers);
+    @memset(run.moved, false);
+    run.move_from = players - newcomers;
+    run.move_error = null;
+    if (!try run.wait(newcomers * settings.join_interval_ms / 1000 + 120, Run.joinedAndMoved)) try problems.append(allocator, "not every bot joined in time");
+    if (run.move_error) |err| return err;
     result.join_s = seconds(latest(swarm, .spawned_ns) -| admitted_at);
     var cows_missing: u64 = 0;
     if (cows > run.cows) {
@@ -775,20 +820,23 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
             try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ swarm.total(.cows_seen), cows }));
         }
     }
-    // The server moves each new player to where its scenario starts, as flying there would take
-    // minutes a step and measure nothing.
-    if (scenario_kind != .cows and !try run.wait(60, Run.settled)) try problems.append(allocator, "not every bot had its first action handled in time");
-    for (swarm.bots[players - newcomers .. players]) |*each| {
-        // Joined, so it knows the spawn its spot is laid out from, as the bot does.
-        if (each.counters.get(.spawned_ns) == 0) continue;
-        const spot = scenario.startSpot(swarm.config, each, swarm.bots.len) orelse continue;
-        try server.teleport(allocator, each.label(), spot);
-    }
     if (scenario_kind.travels()) {
         run.phase = "travel";
         const travel_start = now();
         if (!try run.wait(300, Run.arrived)) try problems.append(allocator, "not every bot reached its spot in time");
         result.travel_s = seconds(now() - travel_start);
+    }
+    if (scenario_kind.moves()) {
+        // Measured once every player holds its view where it was moved to, so every server is
+        // measured holding its players rather than while it loads them, however fast it loads.
+        // What loading took is a result of its own.
+        run.phase = "settle";
+        const settle_start = now();
+        if (!try run.wait(settings.view_limit_s, Run.placedViews)) try problems.append(allocator, try std.fmt.allocPrint(allocator, "not every player held its view within {d} s of arriving", .{settings.view_limit_s}));
+        result.settle_s = seconds(now() - settle_start);
+        const arrival = gapStats(swarm.bots[players - newcomers .. players], .placed_ns, .placed_view_ns);
+        result.arrival_view_s = arrival.median;
+        result.arrival_view_max_s = arrival.maximum;
     }
     run.phase = "warmup";
     // The first step also waits out a server warming up after its start, as a JVM compiling its
@@ -873,7 +921,7 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     // The first limit the step broke, in order of how plainly it is the server's.
     const failed = swarm.count(.failed);
     var viewless: usize = 0;
-    for (swarm.joining()) |*each| viewless += @intFromBool(each.phase.load(.acquire) != .failed and each.counters.get(.viewed_ns) == 0);
+    for (swarm.joining()) |*each| viewless += @intFromBool(each.phase.load(.acquire) != .failed and !scenario_kind.heldView(&each.counters));
     const corrections = swarm.total(.corrections) - first_corrections;
     result.limit = if (failed != 0)
         try std.fmt.allocPrint(allocator, "{d} {s} disconnected", .{ failed, if (failed == 1) "player was" else "players were" })
@@ -939,7 +987,10 @@ fn check(allocator: std.mem.Allocator, swarm: *bot.Swarm, kind: scenario.Kind, p
             try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} failed: {s} {s}", .{ each.label(), @errorName(each.failure.?), each.reasonText() }));
             continue;
         }
-        if (counters.get(.viewed_ns) == 0) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} got {d} chunks, short of a full view", .{ each.label(), counters.get(.chunks) }));
+        if (!kind.heldView(counters)) {
+            const at = counters.get(.view_missing_at);
+            try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} got {d} chunks, short of a full view by {d}, as at {d},{d} from its own", .{ each.label(), counters.get(.chunks), counters.get(.view_missing), @as(i8, @bitCast(@as(u8, @truncate(at >> 8)))), @as(i8, @bitCast(@as(u8, @truncate(at)))) }));
+        }
         if (counters.get(.corrections) != 0) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} was moved back {d} times", .{ each.label(), counters.get(.corrections) }));
         if (counters.get(.keepalives) == 0) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} got no keep alive", .{each.label()}));
         switch (kind) {
@@ -1179,6 +1230,22 @@ fn medianGap(allocator: std.mem.Allocator, swarm: *bot.Swarm, from: bot.Counter,
     if (gaps.items.len == 0) return 0;
     std.mem.sort(u64, gaps.items, {}, std.sort.asc(u64));
     return seconds(gaps.items[gaps.items.len / 2]);
+}
+
+/// The median and the slowest gap between two moments of each of these bots that has both.
+fn gapStats(group: []bot.Bot, from: bot.Counter, to: bot.Counter) struct { median: f64, maximum: f64 } {
+    var gaps: [1024]u64 = undefined;
+    var count: usize = 0;
+    for (group) |*each| {
+        const start = each.counters.get(from);
+        const end = each.counters.get(to);
+        if (start == 0 or end < start or count == gaps.len) continue;
+        gaps[count] = end - start;
+        count += 1;
+    }
+    if (count == 0) return .{ .median = 0, .maximum = 0 };
+    std.mem.sort(u64, gaps[0..count], {}, std.sort.asc(u64));
+    return .{ .median = seconds(gaps[count / 2]), .maximum = seconds(gaps[count - 1]) };
 }
 
 fn traffic(allocator: std.mem.Allocator, swarm: *bot.Swarm) !TrafficSummary {

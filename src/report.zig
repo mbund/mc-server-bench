@@ -192,11 +192,15 @@ const server_measures = [_]ServerMeasure{
     .{ .title = "Status answered", .column = "Status", .unit = "s", .path = &.{"startup_s"}, .median = true },
     .{ .title = "First chunk", .column = "First chunk", .unit = "s", .path = &.{"first_chunk_s"}, .median = true },
     .{ .title = "Full render distance", .column = "Full view", .unit = "s", .path = &.{"full_view_s"}, .median = true },
+    // From a player arriving where it stands to it holding the view there, each step's median
+    // and slowest player, as the median over the steps.
+    .{ .title = "Arrival to full view", .column = "Arrival view", .unit = "s", .path = &.{"arrival_view_s"}, .median = true },
+    .{ .title = "Slowest arrival to full view", .column = "Slowest arrival", .unit = "s", .path = &.{"arrival_view_max_s"}, .median = true },
     .{ .title = "World on disk", .column = "World", .unit = "MB", .path = &.{"world_mb"}, .median = false },
 };
 
-/// How long each server takes to start, three ways, and how much it keeps on disk, which no player
-/// count changes. All come from the idle runs.
+/// How long each server takes to start, three ways, to load a player that arrives, and how much it
+/// keeps on disk, which no player count changes. All come from the idle runs.
 fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, directory: []const u8, charts_url: ?[]const u8, runs: []const Object) !void {
     const terrains = [_]server_module.Terrain{ .flat, .real };
     comptime std.debug.assert(terrains.len == charts.terrains.len);
@@ -231,21 +235,24 @@ fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writ
     }
     if (!any) return;
     const name = "startup-world.svg";
-    const image = try charts.dots(allocator, "Startup and world size", &panels);
+    const image = try charts.dots(allocator, "Startup, loading and world size", &panels);
     const folder = try std.fs.path.join(allocator, &.{ directory, "charts" });
     try std.Io.Dir.cwd().createDirPath(io, folder);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ folder, name }), .data = image });
     try writer.print(
-        \\## Startup and world size
+        \\## Startup, loading and world size
         \\
         \\Startup is timed from launching the server three ways: to its first answer to a status
         \\request, to a player logged in, without authentication, holding its first chunk, and to
         \\that player holding every chunk of its render distance. Each is the median of the server's
-        \\idle runs. **World on disk** is everything the server keeps for its world once its idle ramp
+        \\idle runs. **Arrival to full view** is how long a player moved to where it stands waits for
+        \\every chunk of its render distance there: each step's median player, and its slowest, as
+        \\the median over the idle steps. Players arrive one join interval apart, the same for every
+        \\server, and a step is measured only once all of them hold their views. **World on disk** is everything the server keeps for its world once its idle ramp
         \\stopped, caches included. On real terrain every server starts from the same
         \\square of pregenerated chunks, which SteelMC, reading no vanilla worlds, generates itself.
         \\
-        \\![Startup times and world size on disk of every server, flat and real terrain, on log scales]({s})
+        \\![Startup times, loading times and world size on disk of every server, flat and real terrain, on log scales]({s})
         \\
         \\| Server |
     , .{try chartLink(allocator, charts_url, name)});

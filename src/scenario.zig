@@ -51,6 +51,17 @@ pub const Kind = enum {
     }
 
     /// Whether bots must reach a place before measuring starts.
+    /// Whether the server moves each player to where the scenario starts as it joins.
+    pub fn moves(kind: Kind) bool {
+        return kind != .cows and kind != .warp;
+    }
+
+    /// Whether a bot holds a full view: where it was moved to for a scenario that moves it,
+    /// otherwise anywhere it was sent one.
+    pub fn heldView(kind: Kind, counters: *const bot_module.Counters) bool {
+        return if (kind.moves()) counters.get(.placed_view_ns) != 0 else counters.get(.viewed_ns) != 0;
+    }
+
     pub fn travels(kind: Kind) bool {
         return kind != .explore and kind != .cows and kind != .warp;
     }
@@ -91,8 +102,30 @@ const view_chunks: u64 = count: {
     break :count count;
 };
 
+/// The chunks of a full view, as offsets from the chunk the player stands in.
+pub const view_offsets: [view_chunks][2]i8 = offsets: {
+    @setEvalBranchQuota(10_000);
+    var result: [view_chunks][2]i8 = undefined;
+    var count: usize = 0;
+    const reach: i64 = view_distance + 1;
+    var x: i64 = -reach;
+    while (x <= reach) : (x += 1) {
+        var z: i64 = -reach;
+        while (z <= reach) : (z += 1) {
+            const dx: i64 = @max(0, (if (x < 0) -x else x) - 1);
+            const dz: i64 = @max(0, (if (z < 0) -z else z) - 1);
+            if (dx * dx + dz * dz < view_distance * view_distance) {
+                result[count] = .{ @intCast(x), @intCast(z) };
+                count += 1;
+            }
+        }
+    }
+    break :offsets result;
+};
+
 test "a full view is the chunks vanilla tracks" {
     if (view_distance == 8) try std.testing.expectEqual(@as(u64, 257), viewChunks());
+    try std.testing.expectEqual(viewChunks(), view_offsets.len);
 }
 
 /// Where the server moves a bot as it joins, as /tp does, and where the bot starts the scenario,

@@ -31,6 +31,89 @@ pub const chunks_per_tick: f32 = 25;
 pub const entity_player = 156;
 pub const entity_cow = 30;
 
+/// The chunks a bot holds loaded, by position, in a fixed table no larger than a view and the
+/// ring around it ever needs: open addressing, probed linearly, deleted by shifting back.
+pub const ChunkSet = struct {
+    const capacity = 1024;
+    keys: [capacity]u64 = undefined,
+    occupied: std.StaticBitSet(capacity) = .empty,
+    count: usize = 0,
+
+    fn key(x: i32, z: i32) u64 {
+        return @as(u64, @as(u32, @bitCast(x))) << 32 | @as(u32, @bitCast(z));
+    }
+
+    fn home(value: u64) usize {
+        return @intCast(std.hash.int(value) & (capacity - 1));
+    }
+
+    pub fn contains(self: *const ChunkSet, x: i32, z: i32) bool {
+        const value = key(x, z);
+        var at = home(value);
+        while (self.occupied.isSet(at)) : (at = (at + 1) & (capacity - 1)) {
+            if (self.keys[at] == value) return true;
+        }
+        return false;
+    }
+
+    /// Adds a chunk, unless the table is full, which a server keeping more than a view and its
+    /// ring loaded for one player would be.
+    pub fn insert(self: *ChunkSet, x: i32, z: i32) void {
+        const value = key(x, z);
+        var at = home(value);
+        while (self.occupied.isSet(at)) : (at = (at + 1) & (capacity - 1)) {
+            if (self.keys[at] == value) return;
+        }
+        if (self.count == capacity * 3 / 4) return;
+        self.keys[at] = value;
+        self.occupied.set(at);
+        self.count += 1;
+    }
+
+    pub fn remove(self: *ChunkSet, x: i32, z: i32) void {
+        const value = key(x, z);
+        var at = home(value);
+        while (self.occupied.isSet(at)) : (at = (at + 1) & (capacity - 1)) {
+            if (self.keys[at] != value) continue;
+            // Each entry after it that would be found earlier moves into the gap.
+            var gap = at;
+            var next = (gap + 1) & (capacity - 1);
+            while (self.occupied.isSet(next)) : (next = (next + 1) & (capacity - 1)) {
+                const wanted = home(self.keys[next]);
+                const distance_next = (next -% wanted) & (capacity - 1);
+                const distance_gap = (gap -% wanted) & (capacity - 1);
+                if (distance_gap < distance_next) {
+                    self.keys[gap] = self.keys[next];
+                    gap = next;
+                }
+            }
+            self.occupied.unset(gap);
+            self.count -= 1;
+            return;
+        }
+    }
+};
+
+test "a chunk set holds what was added and not what was removed" {
+    var set: ChunkSet = .{};
+    var x: i32 = -12;
+    while (x <= 12) : (x += 1) {
+        var z: i32 = -12;
+        while (z <= 12) : (z += 1) set.insert(x, z);
+    }
+    try std.testing.expectEqual(@as(usize, 625), set.count);
+    x = -12;
+    while (x <= 12) : (x += 1) {
+        var z: i32 = -12;
+        while (z <= 12) : (z += 1) if (@mod(x + z, 3) == 0) set.remove(x, z);
+    }
+    x = -12;
+    while (x <= 12) : (x += 1) {
+        var z: i32 = -12;
+        while (z <= 12) : (z += 1) try std.testing.expectEqual(@mod(x + z, 3) != 0, set.contains(x, z));
+    }
+}
+
 /// Sugar cane's block in 26.2, for the warp scenario's check, set before the bots start.
 var cane_block: u16 = 0;
 
@@ -74,6 +157,14 @@ pub const Counter = enum {
     first_chunk_ns,
     /// When the bot had the chunks of a full view around its spawn.
     viewed_ns,
+    /// When the server moved the bot to where its scenario starts, and when every chunk of the
+    /// view around it there was loaded.
+    placed_ns,
+    placed_view_ns,
+    /// Chunks of the view around where the bot was moved that it does not hold, as last
+    /// counted, and the offset of one of them, x in the high half and z in the low.
+    view_missing,
+    view_missing_at,
     /// When the bot reached the place its scenario sends it to.
     arrived_ns,
 };
@@ -187,6 +278,10 @@ pub const Bot = struct {
     spawned: bool = false,
     /// Moved by the server to where its scenario starts.
     placed: bool = false,
+    /// The chunks the bot has loaded, as the server sent and unloaded them, and whether it
+    /// waits to hold the whole view around where it was moved.
+    loaded: ChunkSet = .{},
+    view_pending: bool = false,
     /// What the warp scenario's check counted in each of the farm's chunks.
     farm_tallies: [farm.chunks]farm.Tally = @splat(.{}),
     position: [3]f64 = @splat(0),
@@ -569,6 +664,12 @@ pub const Bot = struct {
         const Out = Protocol.play.toServer;
         var buffer: [256]u8 = undefined;
         if (id == In.packetId(.map_chunk)) {
+            // The chunk's x and z lead the packet, which the farm check below reads whole.
+            const at = reader.bytes[reader.at..];
+            if (at.len >= 8) {
+                self.loaded.insert(std.mem.readInt(i32, at[0..4], .big), std.mem.readInt(i32, at[4..8], .big));
+                if (self.view_pending) self.checkView();
+            }
             self.counters.add(.chunks, 1);
             self.counters.add(.chunk_bytes, frame_bytes);
             if (self.counters.get(.chunks) == 1) self.counters.mark(.first_chunk_ns, now());
@@ -589,6 +690,9 @@ pub const Bot = struct {
             try self.queue(packet.bytes());
         } else if (id == In.packetId(.unload_chunk)) {
             self.counters.add(.unloads, 1);
+            // The chunk as one long, z above x.
+            const value = try reader.int(u64);
+            self.loaded.remove(@bitCast(@as(u32, @truncate(value))), @bitCast(@as(u32, @truncate(value >> 32))));
         } else if (id == In.packetId(.ping_response)) {
             const sent: u64 = @bitCast(try reader.int(i64));
             const moment = now();
@@ -681,7 +785,12 @@ pub const Bot = struct {
             for (spot, self.position) |want, have| if (@abs(want - have) > 0.01) break :at false;
             break :at true;
         } else false;
-        if (placed) self.placed = true;
+        if (placed and !self.placed) {
+            self.placed = true;
+            self.counters.mark(.placed_ns, now());
+            self.view_pending = true;
+        }
+        if (placed) self.checkView();
         if (self.spawned and !placed) {
             self.counters.add(.corrections, 1);
         } else if (!self.spawned) {
@@ -699,6 +808,24 @@ pub const Bot = struct {
     /// the spawn.
     fn markJoined(self: *Bot) void {
         if (self.spawned and self.spawn != null) self.counters.mark(.spawned_ns, now());
+    }
+
+    /// Marks the bot as holding its view once every chunk of the view around where it stands is
+    /// loaded, after the server moved it there.
+    fn checkView(self: *Bot) void {
+        if (!self.view_pending) return;
+        const chunk_x: i32 = @intFromFloat(@floor(self.position[0] / 16));
+        const chunk_z: i32 = @intFromFloat(@floor(self.position[2] / 16));
+        var missing: u64 = 0;
+        for (scenario.view_offsets) |offset| {
+            if (self.loaded.contains(chunk_x + offset[0], chunk_z + offset[1])) continue;
+            if (missing == 0) self.counters.set(.view_missing_at, @as(u64, @as(u8, @bitCast(offset[0]))) << 8 | @as(u8, @bitCast(offset[1])));
+            missing += 1;
+        }
+        self.counters.set(.view_missing, missing);
+        if (missing != 0) return;
+        self.view_pending = false;
+        self.counters.mark(.placed_view_ns, now());
     }
 
     /// Tells the server where the bot is, with its look when `look` is set.
