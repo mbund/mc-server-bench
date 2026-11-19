@@ -56,6 +56,8 @@ pub const Counter = enum {
     /// Columns of the warp scenario's farm the bot found three tall, and short.
     cane_full,
     cane_short,
+    /// Cows of the warp scenario still where they were summoned, as one that never wandered is.
+    cows_unmoved,
     entities_removed,
     edits,
     acks,
@@ -623,6 +625,11 @@ pub const Bot = struct {
             const kind = try reader.varint();
             self.counters.add(if (kind == entity_player) .players_seen else .entities_seen, 1);
             if (kind == entity_cow) self.counters.add(.cows_seen, 1);
+            if (kind == entity_cow and worker.swarm.config.kind == .warp) {
+                var at: [3]f64 = undefined;
+                for (&at) |*axis| axis.* = @bitCast(try reader.int(u64));
+                if (farm.atSummonSpot(at)) self.counters.add(.cows_unmoved, 1);
+            }
         } else if (id == In.packetId(.entity_destroy)) {
             self.counters.add(.entities_removed, @intCast(@max(0, try reader.varint())));
         } else if (id == In.packetId(.acknowledge_player_digging)) {

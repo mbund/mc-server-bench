@@ -351,6 +351,8 @@ pub const Warp = struct {
     canes: u64 = 0,
     cows_seen: u64 = 0,
     cows: u64 = 0,
+    /// Cows the player found still where they were summoned, which never wandered.
+    cows_unmoved: u64 = 0,
 };
 
 pub const PacketTraffic = struct { name: []const u8, count_per_player: f64, kb_per_player: f64, decoded_kb_per_player: f64 };
@@ -718,6 +720,8 @@ fn measureWarp(allocator: std.mem.Allocator, io: std.Io, root: []const u8, setti
     result.warp.cane_full = swarm.total(.cane_full);
     result.warp.cane_short = swarm.total(.cane_short);
     result.warp.cows_seen = swarm.total(.cows_seen);
+    result.warp.cows_unmoved = swarm.total(.cows_unmoved);
+    std.log.info("  the player saw {d} cows, {d} still where they were summoned", .{ result.warp.cows_seen, result.warp.cows_unmoved });
     if (result.warp.cane_full != farm.canes) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{d} of {d} cane grew three tall, {d} short", .{ result.warp.cane_full, farm.canes, result.warp.cane_short }));
     if (result.warp.cows_seen != farm.cows) try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ result.warp.cows_seen, farm.cows }));
     for (swarm.joining()) |*each| if (each.phase.load(.acquire) == .failed)

@@ -65,6 +65,16 @@ pub fn cowPosition(index: usize) [3]f64 {
     return .{ @as(f64, @floatFromInt(at_x)) + 0.5, cane_y, @as(f64, @floatFromInt(at_z)) + 0.5 };
 }
 
+/// Whether a cow stands where one was summoned, to a quarter of a block across, as a cow that
+/// never wandered does after the warp.
+pub fn atSummonSpot(at: [3]f64) bool {
+    for (0..cows) |index| {
+        const spot = cowPosition(index);
+        if (@abs(at[0] - spot[0]) < 0.25 and @abs(at[2] - spot[2]) < 0.25) return true;
+    }
+    return false;
+}
+
 /// The ticks the warp runs. Vanilla ticks `randomTickSpeed` (3) random blocks of each section a
 /// tick, so a block is ticked 3/4096 times a tick, and cane grows a block every 16 random ticks
 /// on its top block, 32 from one block tall to three. Over this many ticks a block expects 90, and
