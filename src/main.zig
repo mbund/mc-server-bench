@@ -574,7 +574,11 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     defer if (dump) |fd| {
         _ = linux.close(fd);
     };
-    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump }, if (counting_cows) 1 else most, settings.bot_threads);
+    const failed_frames = openDirectory(allocator, directory);
+    defer if (failed_frames) |fd| {
+        _ = linux.close(fd);
+    };
+    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump, .failed_frames = failed_frames }, if (counting_cows) 1 else most, settings.bot_threads);
     var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched };
     try swarm.start();
     var swarm_stopped = false;
@@ -748,7 +752,11 @@ fn measureWarp(allocator: std.mem.Allocator, io: std.Io, root: []const u8, setti
     }
 
     // One player joins to check the farm.
-    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = .warp, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms }, 1, 1);
+    const failed_frames = openDirectory(allocator, directory);
+    defer if (failed_frames) |fd| {
+        _ = linux.close(fd);
+    };
+    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = .warp, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .failed_frames = failed_frames }, 1, 1);
     var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched };
     try swarm.start();
     swarm.admit(1);
@@ -1330,4 +1338,13 @@ fn pregen(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings: 
     });
     const world = try std.fs.path.join(allocator, &.{ directory, kind.worldPaths()[0] });
     std.log.info("world of {d:.0} MB in {s}", .{ megabytes(try diskUsage(allocator, io, world)), world });
+}
+
+/// A run's directory, open for bots to save frames they could not read into, or null when it
+/// cannot be opened, which only loses those.
+fn openDirectory(allocator: std.mem.Allocator, directory: []const u8) ?linux.fd_t {
+    const path = std.fmt.allocPrintSentinel(allocator, "{s}", .{directory}, 0) catch return null;
+    const opened = linux.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
+    if (linux.errno(opened) != .SUCCESS) return null;
+    return @intCast(opened);
 }

@@ -274,6 +274,10 @@ pub const Bot = struct {
     large: bool = false,
     waiting_overflow: bool = false,
     frame_total: usize = 0,
+    /// The last frames read, newest at `recent_count % recent.len`, kept to say what came
+    /// before a frame that could not be read.
+    recent: [16]Recent = undefined,
+    recent_count: usize = 0,
     entity: i32 = 0,
     spawned: bool = false,
     /// Moved by the server to where its scenario starts.
@@ -336,6 +340,42 @@ pub const Bot = struct {
 
     pub fn reasonText(self: *const Bot) []const u8 {
         return self.reason[0..self.reason_len];
+    }
+
+    /// Writes the frame the bot could not read to `failed-frames/<bot>.bin` in the run's directory: a
+    /// line of JSON saying what failed and what came before, then everything the input held,
+    /// decrypted, the frame at `frame_start..frame_end` among it. Whether its bytes are a whole
+    /// stream of the wrong length, a stream that turns into another packet partway, or nothing
+    /// like a frame at all tells a server's bad bytes from a bot that lost its place.
+    fn saveFailure(self: *Bot, worker: *Worker, err: anyerror, input: []const u8, frame_start: usize, frame_end: usize) void {
+        const directory = worker.swarm.config.failed_frames orelse return;
+        var name: [64]u8 = undefined;
+        const path = std.fmt.bufPrintSentinel(&name, "failed-frames/{s}.bin", .{self.label()}, 0) catch return;
+        _ = linux.mkdirat(directory, "failed-frames", 0o755);
+        const opened = linux.openat(directory, path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o644);
+        if (linux.errno(opened) != .SUCCESS) return;
+        const fd: linux.fd_t = @intCast(opened);
+        defer _ = linux.close(fd);
+        var header_bytes: [2048]u8 = undefined;
+        var header: std.Io.Writer = .fixed(&header_bytes);
+        header.print("{{\"bot\":\"{s}\",\"error\":\"{s}\",\"phase\":\"{s}\",\"compressed\":{},\"encrypted\":{},\"overflow\":{},\"frame_start\":{d},\"frame_end\":{d},\"input_bytes\":{d},\"frames_read\":{d},\"recent\":[", .{
+            self.label(), @errorName(err), @tagName(self.phase.load(.monotonic)), self.compressed, self.receiving != null, self.large, frame_start, frame_end, input.len, self.recent_count,
+        }) catch return;
+        // Oldest first: packet id, bytes on the wire, bytes decoded.
+        const kept = @min(self.recent_count, self.recent.len);
+        for (0..kept) |offset| {
+            const entry = self.recent[(self.recent_count - kept + offset) % self.recent.len];
+            header.print("{s}[{d},{d},{d}]", .{ if (offset == 0) "" else ",", entry.id, entry.wire, entry.decoded }) catch return;
+        }
+        header.writeAll("]}\n") catch return;
+        for ([_][]const u8{ header.buffered(), input }) |bytes| {
+            var written: usize = 0;
+            while (written < bytes.len) {
+                const result = linux.write(fd, bytes[written..].ptr, bytes.len - written);
+                if (linux.errno(result) != .SUCCESS or result == 0) return;
+                written += result;
+            }
+        }
     }
 
     fn fail(self: *Bot, err: anyerror, reason: []const u8) void {
@@ -468,15 +508,24 @@ pub const Bot = struct {
         while (start < self.filled) {
             const length, const prefix = readVarint(buffer[start..self.filled]) catch |err| switch (err) {
                 error.Incomplete => break,
-                else => return err,
+                else => {
+                    self.saveFailure(worker, err, buffer[0..self.filled], start, self.filled);
+                    return err;
+                },
             };
-            if (length <= 0 or length > frame_maximum) return error.InvalidFrame;
+            if (length <= 0 or length > frame_maximum) {
+                self.saveFailure(worker, error.InvalidFrame, buffer[0..self.filled], start, self.filled);
+                return error.InvalidFrame;
+            }
             const end = start + prefix + @as(usize, @intCast(length));
             if (end > self.filled) {
                 incomplete = end - start;
                 break;
             }
-            try self.frame(worker, buffer[start + prefix .. end]);
+            self.frame(worker, buffer[start + prefix .. end]) catch |err| {
+                self.saveFailure(worker, err, buffer[0..self.filled], start, end);
+                return err;
+            };
             if (self.phase.load(.monotonic) == .failed) return;
             start = end;
             // What arrived after the encryption request is already encrypted.
@@ -538,6 +587,8 @@ pub const Bot = struct {
         }
         var reader: Reader = .{ .bytes = body };
         const id = try reader.varint();
+        self.recent[self.recent_count % self.recent.len] = .{ .id = id, .wire = @intCast(raw.len), .decoded = @intCast(body.len) };
+        self.recent_count += 1;
         const traffic = if (self.phase.load(.monotonic) == .play and id >= 0 and id < self.play.len) &self.play[@intCast(id)] else &self.setup;
         traffic.count += 1;
         traffic.wire_bytes += raw.len;
@@ -945,7 +996,14 @@ pub const Configuration = struct {
     /// A file the first bot appends every frame it gets in play to, as a little endian length
     /// and the frame as it crossed the wire, for looking at what servers send.
     dump: ?linux.fd_t = null,
+    /// The run's directory, in whose `failed-frames` a bot writes the frame it could not read,
+    /// with what its input held, for telling a server that sent bad bytes from a bot that lost
+    /// its place.
+    failed_frames: ?linux.fd_t = null,
 };
+
+/// A frame a bot read: its packet id, its length on the wire and decoded.
+const Recent = struct { id: i32, wire: u32, decoded: u32 };
 
 /// The bots of one thread and the scratch they share. A pass does each kind of work for all of
 /// them at once: their completions, their tick, their actions, then the receive, send and connect
