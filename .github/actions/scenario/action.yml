@@ -88,3 +88,11 @@ runs:
         name: logs-${{ inputs.scenario }}-${{ inputs.terrain }}
         path: runs/standard/**/server.log
         retention-days: 7
+    # Frames a bot could not read, with the frames before and its input after, to tell a server
+    # that sent bad bytes from a bot that lost its place.
+    - uses: actions/upload-artifact@v7
+      with:
+        name: failed-frames-${{ inputs.scenario }}-${{ inputs.terrain }}
+        path: runs/standard/**/failed-frames/*.bin
+        if-no-files-found: ignore
+        retention-days: 30
