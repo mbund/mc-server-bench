@@ -372,8 +372,11 @@ fn dotPanel(writer: *std.Io.Writer, x: f64, y: f64, panel: DotPanel) !void {
         maximum = @max(maximum, v);
     };
     if (minimum > maximum) return;
-    const low = @floor(std.math.log10(minimum));
     var high = @ceil(std.math.log10(maximum));
+    // At most four decades, as a value near nothing, a player already holding its view on
+    // arriving, would stretch the axis over many more and crowd its labels. Smaller values
+    // sit at its start, their hover saying what they are.
+    const low = @max(@floor(std.math.log10(minimum)), high - 4);
     if (high <= low) high = low + 1;
     const scale = struct {
         fn at(value: f64, l: f64, h: f64, a: f64, b: f64) f64 {
@@ -394,7 +397,7 @@ fn dotPanel(writer: *std.Io.Writer, x: f64, y: f64, panel: DotPanel) !void {
         for (row.values, terrain_colors, 0..) |value, color, terrain| if (plotted(value)) |v| {
             try writer.print("<g><title>{s}, {s} terrain: {d:.2} {s}</title>", .{ @tagName(row.server), terrains[terrain], v, panel.unit });
             const lane = middle + (@as(f64, @floatFromInt(terrain)) - 0.5) * 2 * lane_offset;
-            try marker(writer, terrain, scale(v, low, high, left, right), lane, color);
+            try marker(writer, terrain, scale(@max(v, std.math.pow(f64, 10, low)), low, high, left, right), lane, color);
             try writer.writeAll("</g>");
         };
         try writer.writeByte('\n');
