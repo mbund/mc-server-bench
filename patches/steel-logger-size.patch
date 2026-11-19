@@ -1,0 +1,23 @@
+diff --git a/steel/src/logger/mod.rs b/steel/src/logger/mod.rs
+index f737d04be..ac61d3be7 100644
+--- a/steel/src/logger/mod.rs
++++ b/steel/src/logger/mod.rs
+@@ -27,10 +27,18 @@ mod suggestions;
+ 
+ /// Returns the terminal width, falling back to 80 columns if unavailable or it's <= 0.
+ fn terminal_width() -> usize {
++    // Output piped elsewhere has no size, which crossterm would ask `tput` for, a process per
++    // call and so per line logged.
++    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
++        return 80;
++    }
+     terminal::size().map_or(80, |(w, _)| if w == 0 { 80 } else { w as usize })
+ }
+ /// Returns the terminal height, falling back to 30 rows if unavailable or 1 if it's <= 0.
+ fn terminal_height() -> usize {
++    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
++        return 30;
++    }
+     terminal::size().map_or(30, |(_, h)| if h == 0 { 30 } else { h as usize })
+ }
+ 

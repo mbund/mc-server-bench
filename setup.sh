@@ -108,8 +108,9 @@ fi
 if wants steel; then
   git submodule update --init --recursive servers/steel
   # Its console reads commands only from a terminal, and the bench pipes them for tick queries.
-  # It has no forceload, which generating the same real terrain as vanilla's takes.
-  for patch in "$root/patches/steel-console-stdin.patch" "$root/patches/steel-forceload.patch"; do
+  # It has no forceload, which generating the same real terrain as vanilla's takes. Its logger asks
+  # crossterm for the terminal size on every line, which on a pipe runs `tput` twice a line.
+  for patch in "$root/patches/steel-console-stdin.patch" "$root/patches/steel-forceload.patch" "$root/patches/steel-logger-size.patch"; do
     git -C servers/steel apply --reverse --check "$patch" 2>/dev/null || git -C servers/steel apply "$patch"
   done
   # The CPU model joins the target flags its own config sets, which RUSTFLAGS would replace.
