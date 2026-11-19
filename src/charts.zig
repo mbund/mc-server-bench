@@ -100,7 +100,7 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
 
     var minimum = std.math.inf(f64);
     var maximum = -std.math.inf(f64);
-    for (panel.series) |series| for (series.values) |value| if (value) |v| {
+    for (panel.series) |series| for (series.values) |value| if (plotted(value)) |v| {
         minimum = @min(minimum, v);
         maximum = @max(maximum, v);
     };
@@ -138,14 +138,14 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
         const color = colors[@intFromEnum(series.server)];
         var previous: ?[2]f64 = null;
         for (series.values, 0..) |value, index| {
-            const point: ?[2]f64 = if (value) |v| .{ column(index, counts.len, left, right), scale(v, low, high, top, bottom) } else null;
+            const point: ?[2]f64 = if (plotted(value)) |v| .{ column(index, counts.len, left, right), scale(v, low, high, top, bottom) } else null;
             if (previous != null and point != null) try writer.print("<line x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke=\"{s}\" stroke-width=\"2\" stroke-linecap=\"round\"/>", .{ previous.?[0], previous.?[1], point.?[0], point.?[1], color });
             previous = point;
         }
     }
     for (panel.series) |series| {
         const color = colors[@intFromEnum(series.server)];
-        for (series.values, 0..) |value, index| if (value) |v| {
+        for (series.values, 0..) |value, index| if (plotted(value)) |v| {
             try writer.print("<circle class=\"ring\" cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"4\" fill=\"{s}\" stroke-width=\"2\"><title>{s}, {d} {s}: {d:.2} {s}</title></circle>", .{ column(index, counts.len, left, right), scale(v, low, high, top, bottom), color, @tagName(series.server), counts[index], axis, v, panel.measure.unit });
         };
     }
@@ -156,7 +156,7 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
     var labels: std.ArrayList(Label) = .empty;
     for (panel.series) |series| {
         var index = series.values.len;
-        while (index > 0) : (index -= 1) if (series.values[index - 1]) |v| {
+        while (index > 0) : (index -= 1) if (plotted(series.values[index - 1])) |v| {
             try labels.append(allocator, .{ .server = series.server, .x = column(index - 1, counts.len, left, right) + 8, .y = scale(v, low, high, top, bottom) + 4 });
             break;
         };
@@ -367,7 +367,7 @@ fn dotPanel(writer: *std.Io.Writer, x: f64, y: f64, panel: DotPanel) !void {
     const bottom = top + @as(f64, @floatFromInt(panel.rows.len * row_height));
     var minimum = std.math.inf(f64);
     var maximum = -std.math.inf(f64);
-    for (panel.rows) |row| for (row.values) |value| if (value) |v| {
+    for (panel.rows) |row| for (row.values) |value| if (plotted(value)) |v| {
         minimum = @min(minimum, v);
         maximum = @max(maximum, v);
     };
@@ -391,7 +391,7 @@ fn dotPanel(writer: *std.Io.Writer, x: f64, y: f64, panel: DotPanel) !void {
         const middle = top + (@as(f64, @floatFromInt(index)) + 0.5) * row_height;
         try writer.print("<text class=\"t1\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"end\">{s}</text>", .{ left - 10, middle + 4, @tagName(row.server) });
         try writer.print("<line class=\"grid\" x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke-width=\"1\" stroke-dasharray=\"2 3\"/>", .{ left, middle, right, middle });
-        for (row.values, terrain_colors, 0..) |value, color, terrain| if (value) |v| {
+        for (row.values, terrain_colors, 0..) |value, color, terrain| if (plotted(value)) |v| {
             try writer.print("<g><title>{s}, {s} terrain: {d:.2} {s}</title>", .{ @tagName(row.server), terrains[terrain], v, panel.unit });
             const lane = middle + (@as(f64, @floatFromInt(terrain)) - 0.5) * 2 * lane_offset;
             try marker(writer, terrain, scale(v, low, high, left, right), lane, color);
@@ -408,6 +408,21 @@ fn marker(writer: *std.Io.Writer, shape: usize, x: f64, y: f64, color: []const u
     } else {
         try writer.print("<rect class=\"ring\" x=\"{d:.1}\" y=\"{d:.1}\" width=\"10\" height=\"10\" fill=\"{s}\" stroke-width=\"2\"/>", .{ x - 5, y - 5, color });
     }
+}
+
+/// A value a log scale can show: positive and finite. Others are left out, as missing results
+/// are, since a zero would put the bottom of the scale at minus infinity.
+fn plotted(value: ?f64) ?f64 {
+    const v = value orelse return null;
+    return if (v > 0 and std.math.isFinite(v)) v else null;
+}
+
+test "values a log scale cannot show are left out" {
+    try std.testing.expectEqual(@as(?f64, 2.5), plotted(2.5));
+    try std.testing.expectEqual(@as(?f64, null), plotted(0));
+    try std.testing.expectEqual(@as(?f64, null), plotted(-1));
+    try std.testing.expectEqual(@as(?f64, null), plotted(std.math.inf(f64)));
+    try std.testing.expectEqual(@as(?f64, null), plotted(null));
 }
 
 test "a name exactly a step below another settles there" {
