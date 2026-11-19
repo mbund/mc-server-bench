@@ -189,6 +189,8 @@ pub const Options = struct {
     generating: bool = false,
     /// Whether sessions are encrypted.
     encryption: bool = true,
+    /// The warp scenario, which needs every server to simulate the same mobs with no one online.
+    warp: bool = false,
 };
 
 /// A tick report, as vanilla's `tick query` prints it.
@@ -662,6 +664,17 @@ fn preparePaper(allocator: std.mem.Allocator, io: std.Io, options: Options) !voi
         cwd.access(io, target, .{}) catch return error.MissingPaperSetup;
         try cwd.symLink(io, target, try std.fs.path.join(allocator, &.{ options.directory, name }), .{ .is_directory = true });
     }
+    // With no one online, Paper ticks every animal outside activation range inactively, without
+    // its movement or collisions, which vanilla runs. In the warp, where no one is, animals stay
+    // active so it simulates the same cows as the rest. A range of 0 keeps them active, and the
+    // settings left out keep their defaults.
+    if (options.warp) try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ options.directory, "spigot.yml" }), .data =
+        \\world-settings:
+        \\  default:
+        \\    entity-activation-range:
+        \\      animals: 0
+        \\
+    });
     if (options.kind == .@"paper-antifreecam") {
         const plugins = try std.fs.path.join(allocator, &.{ install, "plugins-antifreecam" });
         cwd.access(io, plugins, .{}) catch return error.MissingPaperSetup;

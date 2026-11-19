@@ -639,6 +639,7 @@ fn measureWarp(allocator: std.mem.Allocator, io: std.Io, root: []const u8, setti
         .metrics = metrics,
         .terrain = settings.terrain,
         .encryption = settings.encryption,
+        .warp = true,
     });
     var stopped = false;
     defer if (!stopped) {
