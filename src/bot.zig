@@ -30,9 +30,11 @@ const tick_ns = 50 * std.time.ns_per_ms;
 /// bots spent once their decoding was cut. It delays what the bots read by up to this, the same
 /// for every server, adding half of it on average to the round trips they time.
 pub const read_interval_ns = 5 * std.time.ns_per_ms;
-/// The chunks per tick a bot asks for after each batch, about what a vanilla client on a desktop
-/// asks for. Servers cap it, vanilla at 64.
-pub const chunks_per_tick: f32 = 25;
+/// The chunks per tick a bot asks for after each batch: far more than any server accepts, so each
+/// streams chunks as fast as it allows, which is what the bench measures, rather than as fast as
+/// the bots ask. Vanilla clamps the rate to 64, Pumpkin and SteelMC to 500, and Lightning Rod
+/// does not pace by it.
+pub const chunks_per_tick: f32 = 1_000_000;
 pub const entity_player = 156;
 pub const entity_cow = 30;
 
