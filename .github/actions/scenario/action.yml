@@ -10,6 +10,10 @@ inputs:
   terrain:
     description: The terrain whose runs it runs, real, flat or wide.
     required: true
+  repeat:
+    description: Which repetition of the scenario this is, each on a machine of its own.
+    required: false
+    default: "1"
   needs:
     description: The job's needs, as JSON, for the keys the jobs it needs made.
     required: true
@@ -77,22 +81,22 @@ runs:
         key: ${{ fromJSON(inputs.needs)[format('steel-{0}', inputs.terrain)].outputs.key }}
         fail-on-cache-miss: true
     - shell: bash
-      run: MC_SERVER_BENCH_BUILT=1 "scenarios/${{ inputs.scenario }}.sh" --terrain=${{ inputs.terrain }}
+      run: MC_SERVER_BENCH_BUILT=1 "scenarios/${{ inputs.scenario }}.sh" --terrain=${{ inputs.terrain }} --repeat=${{ inputs.repeat }}
     - uses: actions/upload-artifact@v7
       with:
-        name: results-${{ inputs.scenario }}-${{ inputs.terrain }}
+        name: results-${{ inputs.scenario }}-${{ inputs.terrain }}-${{ inputs.repeat }}
         path: runs/standard/results.jsonl
     # Every server's own log of its runs, to see from the server's side what went wrong.
     - uses: actions/upload-artifact@v7
       with:
-        name: logs-${{ inputs.scenario }}-${{ inputs.terrain }}
+        name: logs-${{ inputs.scenario }}-${{ inputs.terrain }}-${{ inputs.repeat }}
         path: runs/standard/**/server.log
         retention-days: 7
     # Frames a bot could not read, with the frames before and its input after, to tell a server
     # that sent bad bytes from a bot that lost its place.
     - uses: actions/upload-artifact@v7
       with:
-        name: failed-frames-${{ inputs.scenario }}-${{ inputs.terrain }}
+        name: failed-frames-${{ inputs.scenario }}-${{ inputs.terrain }}-${{ inputs.repeat }}
         path: runs/standard/**/failed-frames/*.bin
         if-no-files-found: ignore
         retention-days: 30
