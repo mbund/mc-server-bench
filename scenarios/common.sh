@@ -29,6 +29,8 @@ worlds=(terrain-real terrain-flat terrain-wide)
 if [[ " ${servers[*]} " == *" lightning-rod "* ]]; then worlds+=(import-real import-flat import-wide); fi
 if [[ " ${servers[*]} " == *" steel "* ]]; then worlds+=(steel-real steel-flat steel-wide); fi
 [ -n "${MC_SERVER_BENCH_BUILT:-}" ] || ./setup.sh bench "${worlds[@]}" "${servers[@]}"
+# CI builds for its runners' CPU on other machines than the ones that run what it built.
+scenarios/cpu.sh
 
 # Measures every server in turn with the same harness options, past any run that fails, unless
 # the run is on another terrain than the one asked for.

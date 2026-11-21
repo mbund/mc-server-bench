@@ -36,6 +36,7 @@ if [ -n "$features" ]; then
   features=${features#+}
   rust_flags+=("-Ctarget-feature=+${features//+/,+}")
 fi
+scenarios/cpu.sh
 
 # The bench builds against Lightning Rod's protocol packages, and so does its Lightning Rod server.
 if wants bench lightning-rod; then git submodule update --init servers/lightning-rod; fi
