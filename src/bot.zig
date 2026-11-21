@@ -320,7 +320,7 @@ pub const Bot = struct {
     /// tell a server that dropped a bot from a bot that went quiet.
     last_read_ns: u64 = 0,
     last_sent_ns: u64 = 0,
-    state: [160]u8 = undefined,
+    state: [255]u8 = undefined,
     state_len: u8 = 0,
     reason: [160]u8 = undefined,
     reason_len: u8 = 0,
@@ -405,7 +405,7 @@ pub const Bot = struct {
         if (self.phase.load(.monotonic) == .failed) return;
         self.failure = err;
         const moment = now();
-        const state = std.fmt.bufPrint(&self.state, "in {s}, spawned {}, placed {}, last read {d} ms and sent {d} ms before, {d} keep alives, receive pending {}, waiting for overflow {}, {d} bytes held, {d} to send", .{
+        const state = std.fmt.bufPrint(&self.state, "{s}, spawned {}, placed {}, read {d} ms and sent {d} ms before, {d} keep alives, receiving {}, awaiting overflow {}, holding {d} B, queued {d} B", .{
             @tagName(self.phase.load(.monotonic)),              self.spawned,                                      self.placed,
             (moment -| self.last_read_ns) / std.time.ns_per_ms, (moment -| self.last_sent_ns) / std.time.ns_per_ms, self.counters.get(.keepalives),
             self.receive_pending,                               self.waiting_overflow,                              self.filled,
@@ -1714,4 +1714,17 @@ test "varints round trip" {
         try std.testing.expectEqual(value, decoded);
         try std.testing.expectEqual(length, used);
     }
+}
+
+test "a failed bot says what it was doing, however large its numbers" {
+    var input: [16]u8 = undefined;
+    var output: [16]u8 = undefined;
+    var bot: Bot = .{ .index = 1, .input = &input, .output = &output, .random = .init(0) };
+    bot.phase.store(.configuration, .release);
+    bot.filled = std.math.maxInt(usize);
+    bot.queued = std.math.maxInt(usize);
+    bot.counters.set(.keepalives, std.math.maxInt(u64));
+    bot.fail(error.WriteFailed, "write failed");
+    try std.testing.expect(std.mem.startsWith(u8, bot.stateText(), "configuration, spawned false"));
+    try std.testing.expect(std.mem.endsWith(u8, bot.stateText(), " B"));
 }
