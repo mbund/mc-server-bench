@@ -29,7 +29,7 @@ const tick_ns = 50 * std.time.ns_per_ms;
 /// submission for all of them, rather than waking for every segment that arrives, most of what the
 /// bots spent once their decoding was cut. It delays what the bots read by up to this, the same
 /// for every server, adding half of it on average to the round trips they time.
-const read_interval_ns = 5 * std.time.ns_per_ms;
+pub const read_interval_ns = 5 * std.time.ns_per_ms;
 /// The chunks per tick a bot asks for after each batch, about what a vanilla client on a desktop
 /// asks for. Servers cap it, vanilla at 64.
 pub const chunks_per_tick: f32 = 25;
@@ -1121,6 +1121,8 @@ pub const Configuration = struct {
     terrain: @import("server.zig").Terrain = .flat,
     /// Time between two bots starting to join.
     join_interval_ns: u64,
+    /// How often each worker reads all its sockets, as `read_interval_ns` says.
+    read_interval_ns: u64 = read_interval_ns,
     /// A file the first bot appends every frame it gets in play to, as a little endian length
     /// and the frame as it crossed the wire, for looking at what servers send.
     dump: ?linux.fd_t = null,
@@ -1145,7 +1147,9 @@ const Worker = struct {
     overflow: []u8,
     overflow_owner: ?u32 = null,
     workspace: java.Wire.Workspace,
-    ring: linux.IoUring,
+    /// Made on the worker's own thread as it starts, with room for `ring_entries`.
+    ring: linux.IoUring = undefined,
+    ring_entries: u16,
     completions: []linux.io_uring_cqe,
     /// When the earliest timeout armed in the ring fires, or never.
     alarm: u64 = std.math.maxInt(u64),
@@ -1162,15 +1166,26 @@ const Worker = struct {
 
     fn run(self: *Worker) void {
         const swarm = self.swarm;
+        // A ring only this thread uses, which then runs the kernel's side of its completions only
+        // as the worker waits on it, rather than interrupting the worker as data arrives. Kernels
+        // older than 6.1 have neither, and get a plain ring.
+        self.ring = linux.IoUring.init(self.ring_entries, linux.IORING_SETUP_SINGLE_ISSUER | linux.IORING_SETUP_DEFER_TASKRUN) catch |deferred| plain: {
+            std.log.warn("bots run a plain ring, as the kernel refused one of their own: {s}", .{@errorName(deferred)});
+            break :plain linux.IoUring.init(self.ring_entries, 0);
+        } catch |err| {
+                for (swarm.bots[self.first..self.last]) |*bot| bot.fail(err, "could not set up its worker's ring");
+                return;
+            };
+        defer self.ring.deinit();
         var next_tick = swarm.started_ns;
         var tick: u64 = 0;
         while (!swarm.stopping.load(.acquire)) {
             const moment = now();
             const reading = moment >= self.next_read;
             if (reading) {
-                self.next_read += read_interval_ns;
+                self.next_read += swarm.config.read_interval_ns;
                 // A worker that fell behind reads from now on rather than bursting the reads it missed.
-                if (self.next_read <= moment) self.next_read = moment + read_interval_ns;
+                if (self.next_read <= moment) self.next_read = moment + swarm.config.read_interval_ns;
             }
             var next_join: u64 = std.math.maxInt(u64);
             for (swarm.bots[self.first..self.last], self.first..) |*bot, index| {
@@ -1345,7 +1360,7 @@ pub const Swarm = struct {
                 .overflow = try allocator.alloc(u8, frame_maximum + 8),
                 .workspace = try java.Wire.Workspace.init(allocator),
                 // Room for each bot's receive, send and connect, and the timeouts in between.
-                .ring = try linux.IoUring.init(try std.math.ceilPowerOfTwo(u16, @intCast(3 * (last - first) + 16)), 0),
+                .ring_entries = try std.math.ceilPowerOfTwo(u16, @intCast(3 * (last - first) + 16)),
                 .completions = try allocator.alloc(linux.io_uring_cqe, 6 * (last - first) + 32),
             };
         }

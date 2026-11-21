@@ -33,6 +33,8 @@ pub const Settings = struct {
     /// One worker for each of the bots' CPUs when not given, as more would only take turns on them.
     bot_threads: ?usize = null,
     join_interval_ms: u64 = 200,
+    /// How often the bots read their sockets.
+    read_interval_us: u64 = bot.read_interval_ns / std.time.ns_per_us,
     /// The longest a step waits for its players to hold their views before it counts as a limit.
     view_limit_s: u64 = 60,
     /// The longest a warp may run before it counts as unfinished.
@@ -132,7 +134,7 @@ fn usage() error{InvalidArguments} {
         \\servers: vanilla lightning-rod pumpkin steel paper paper-antifreecam folia fabric-optimized
         \\scenarios: idle wander spread explore build cows warp
         \\options: --warmup=<s> --seconds=<s> --server-cpus=<list> --bot-cpus=<list>
-        \\         --bot-threads=<n> --join-interval=<ms> --out=<directory> --keep-worlds
+        \\         --bot-threads=<n> --join-interval=<ms> --read-interval=<us> --out=<directory> --keep-worlds
         \\         --dump-frames=<path prefix> --encryption=on|off --warp-limit=<s> --repeat=<n>
     , .{});
     return error.InvalidArguments;
@@ -166,6 +168,9 @@ fn parseOption(settings: *Settings, argument: []const u8) !void {
         settings.bot_cpus = value;
     } else if (std.mem.eql(u8, name, "--bot-threads")) {
         settings.bot_threads = try std.fmt.parseInt(usize, value, 10);
+    } else if (std.mem.eql(u8, name, "--read-interval")) {
+        settings.read_interval_us = try std.fmt.parseInt(u64, value, 10);
+        if (settings.read_interval_us == 0) return error.InvalidArguments;
     } else if (std.mem.eql(u8, name, "--join-interval")) {
         settings.join_interval_ms = try std.fmt.parseInt(u64, value, 10);
     } else if (std.mem.eql(u8, name, "--warp-limit")) {
@@ -594,7 +599,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     defer if (failed_frames) |fd| {
         _ = linux.close(fd);
     };
-    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump, .failed_frames = failed_frames }, if (counting_cows) 1 else most, settings.bot_threads.?);
+    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .read_interval_ns = settings.read_interval_us * std.time.ns_per_us, .dump = dump, .failed_frames = failed_frames }, if (counting_cows) 1 else most, settings.bot_threads.?);
     var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched };
     try swarm.start();
     var swarm_stopped = false;
@@ -773,7 +778,7 @@ fn measureWarp(allocator: std.mem.Allocator, io: std.Io, root: []const u8, setti
     defer if (failed_frames) |fd| {
         _ = linux.close(fd);
     };
-    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = .warp, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .failed_frames = failed_frames }, 1, 1);
+    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = .warp, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .read_interval_ns = settings.read_interval_us * std.time.ns_per_us, .failed_frames = failed_frames }, 1, 1);
     var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched };
     try swarm.start();
     swarm.admit(1);
@@ -963,8 +968,8 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     else
         "";
     // Bots too busy could have broken any of the others themselves, which leaves the step
-    // inconclusive, but what else broke is kept with it: bots a little late cannot delay a
-    // server's acknowledgements by seconds.
+    // inconclusive, but what else broke is kept with it, as it may still be the server's. Bots
+    // that fall behind for good delay what they time without bound, seconds and more.
     result.bot_bound = window.bot_cpu >= limits.bot_cpu;
     result.limit = if (!result.bot_bound)
         broken
@@ -1326,7 +1331,7 @@ fn bots(allocator: std.mem.Allocator, io: std.Io, settings: Settings) !void {
         std.log.err("nothing is listening on port {d}", .{settings.port});
         return error.NothingListening;
     }
-    const swarm = try bot.Swarm.init(allocator, .{ .port = settings.port, .kind = kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms }, players, settings.bot_threads.?);
+    const swarm = try bot.Swarm.init(allocator, .{ .port = settings.port, .kind = kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .read_interval_ns = settings.read_interval_us * std.time.ns_per_us }, players, settings.bot_threads.?);
     try swarm.start();
     defer swarm.stop();
     swarm.admit(players);
