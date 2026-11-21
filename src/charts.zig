@@ -1,11 +1,15 @@
 //! Charts for the report: for one terrain and scenario, a panel per measure with a line per server
-//! over player counts, or cow counts, on a log scale so a server using a little and one using thousands of times
-//! more both read, drawn as one SVG file. Measures of different units never share a panel.
+//! over player counts, or cow counts, on a log scale, or memory on a linear one up to the machine's,
+//! with the bench's limits marked, drawn as one SVG file. Measures of different units never share
+//! a panel.
 
 const std = @import("std");
 const server_module = @import("server.zig");
+const config = @import("config.zig");
 
 const Server = server_module.Kind;
+
+pub const Scale = enum { log, linear };
 
 pub const Measure = struct {
     title: []const u8,
@@ -13,18 +17,31 @@ pub const Measure = struct {
     path: []const []const u8,
     /// Whether the value counts only where the server reports its own tick times.
     reported: bool = false,
+    /// What a result is multiplied by to read in `unit`.
+    factor: f64 = 1,
+    scale: Scale = .log,
+    /// A line drawn across the panel at the limit the bench holds servers to.
+    limit: ?Threshold = null,
 };
 
 pub const measures = [_]Measure{
     .{ .title = "CPU time per tick", .unit = "ms", .path = &.{ "window", "cpu_ms_per_tick" } },
-    .{ .title = "Mean tick time (mspt)", .unit = "ms", .path = &.{ "window", "mspt", "mean_ms" }, .reported = true },
+    .{ .title = "Mean tick time (mspt)", .unit = "ms", .path = &.{ "window", "mspt", "mean_ms" }, .reported = true, .limit = .{ .value = config.limits.mspt, .label = "tick budget" } },
     .{ .title = "Received per player", .unit = "KB/s", .path = &.{ "window", "received_kb_per_s_per_player" } },
-    .{ .title = "Peak memory", .unit = "MB", .path = &.{"peak_rss_mb"} },
-    .{ .title = "Action acknowledged p99", .unit = "ms", .path = &.{ "window", "action_p99_ms" } },
+    // Memory reads against the machine's, from nothing to all of it.
+    .{ .title = "Peak memory", .unit = "GB", .path = &.{"peak_rss_mb"}, .factor = 1.0 / 1024.0, .scale = .linear },
+    .{ .title = "Action acknowledged p99", .unit = "ms", .path = &.{ "window", "action_p99_ms" }, .limit = .{ .value = config.limits.action_p99_ms, .label = "limit" } },
+};
+
+/// A value marked across a panel with a dashed line and its label, which the panel's range always
+/// takes in.
+pub const Threshold = struct {
+    value: f64,
+    label: []const u8,
 };
 
 /// One server's values in a panel, one per player count, null where it has no result or a value
-/// a log scale cannot show.
+/// its scale cannot show.
 pub const Series = struct {
     server: Server,
     values: []const ?f64,
@@ -33,6 +50,10 @@ pub const Series = struct {
 pub const Panel = struct {
     measure: Measure,
     series: []const Series,
+    /// Lines across the panel besides the measure's limit, such as the machine's memory.
+    thresholds: []const Threshold = &.{},
+    /// The top of a linear scale, which the panel reaches whatever its values.
+    top: ?f64 = null,
 };
 
 /// A fixed color for every server, so a server keeps its color in every chart. Eight hues that
@@ -92,7 +113,8 @@ fn legend(writer: *std.Io.Writer, panels: []const Panel) !void {
 }
 
 fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f64, axis: []const u8, counts: []const u64, panel: Panel) !void {
-    try writer.print("<text class=\"t1 panel\" x=\"{d:.1}\" y=\"{d:.1}\">{s} ({s}, log scale)</text>\n", .{ x, y + 16, panel.measure.title, panel.measure.unit });
+    const linear = panel.measure.scale == .linear;
+    try writer.print("<text class=\"t1 panel\" x=\"{d:.1}\" y=\"{d:.1}\">{s} ({s}{s})</text>\n", .{ x, y + 16, panel.measure.title, panel.measure.unit, if (linear) "" else ", log scale" });
     const left = x + plot_left;
     const right = x + panel_width - plot_right;
     const top = y + plot_top;
@@ -108,22 +130,35 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
         try writer.print("<text class=\"t2\" x=\"{d:.1}\" y=\"{d:.1}\">No server reports this measure here.</text>\n", .{ left, (top + bottom) / 2 });
         return;
     }
-    const low = @floor(std.math.log10(minimum));
-    var high = @ceil(std.math.log10(maximum));
-    if (high <= low) high = low + 1;
+    // Every threshold shows, however far the results keep from it.
+    var thresholds: std.ArrayList(Threshold) = .empty;
+    if (panel.measure.limit) |limit| try thresholds.append(allocator, limit);
+    try thresholds.appendSlice(allocator, panel.thresholds);
+    for (thresholds.items) |threshold| {
+        minimum = @min(minimum, threshold.value);
+        maximum = @max(maximum, threshold.value);
+    }
+    if (panel.top) |reach| maximum = @max(maximum, reach);
+    const range: Range = if (linear) .linear(maximum) else .log(minimum, maximum);
     const scale = struct {
-        fn at(value: f64, l: f64, h: f64, t: f64, b: f64) f64 {
-            return b - (std.math.log10(value) - l) / (h - l) * (b - t);
+        fn at(value: f64, r: Range, t: f64, b: f64) f64 {
+            return b - r.fraction(value) * (b - t);
         }
     }.at;
 
-    // A recessive line at every decade, labelled.
-    var decade = low;
-    while (decade <= high) : (decade += 1) {
-        const at = scale(std.math.pow(f64, 10, decade), low, high, top, bottom);
+    // A recessive line at every decade, or every step of a linear scale, labelled.
+    var mark_label: [32]u8 = undefined;
+    var mark = range.first();
+    while (mark <= range.high * (1 + 1e-9)) : (mark = range.next(mark)) {
+        const at = scale(mark, range, top, bottom);
         try writer.print("<line class=\"grid\" x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke-width=\"1\"/>", .{ left, at, right, at });
-        var label: [16]u8 = undefined;
-        try writer.print("<text class=\"t2\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"end\">{s}</text>\n", .{ left - 6, at + 4, decadeLabel(&label, @intFromFloat(decade)) });
+        try writer.print("<text class=\"t2\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"end\">{s}</text>\n", .{ left - 6, at + 4, range.label(&mark_label, mark) });
+    }
+    // Each threshold as a dashed line with its value, above it and clear of the server names.
+    for (thresholds.items) |threshold| {
+        const at = scale(threshold.value, range, top, bottom);
+        try writer.print("<line class=\"limit\" x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke-width=\"1.5\" stroke-dasharray=\"6 4\"/>", .{ left, at, right, at });
+        try writer.print("<text class=\"limit-text\" x=\"{d:.1}\" y=\"{d:.1}\">{s} {d} {s}</text>\n", .{ left + 4, at - 4, threshold.label, rounded(threshold.value), panel.measure.unit });
     }
     try writer.print("<line class=\"axis\" x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke-width=\"1\"/>\n", .{ left, bottom, right, bottom });
     var shown: [64]bool = undefined;
@@ -138,7 +173,7 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
         const color = colors[@intFromEnum(series.server)];
         var previous: ?[2]f64 = null;
         for (series.values, 0..) |value, index| {
-            const point: ?[2]f64 = if (plotted(value)) |v| .{ column(index, counts.len, left, right), scale(v, low, high, top, bottom) } else null;
+            const point: ?[2]f64 = if (plotted(value)) |v| .{ column(index, counts.len, left, right), scale(v, range, top, bottom) } else null;
             if (previous != null and point != null) try writer.print("<line x1=\"{d:.1}\" y1=\"{d:.1}\" x2=\"{d:.1}\" y2=\"{d:.1}\" stroke=\"{s}\" stroke-width=\"2\" stroke-linecap=\"round\"/>", .{ previous.?[0], previous.?[1], point.?[0], point.?[1], color });
             previous = point;
         }
@@ -146,7 +181,7 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
     for (panel.series) |series| {
         const color = colors[@intFromEnum(series.server)];
         for (series.values, 0..) |value, index| if (plotted(value)) |v| {
-            try writer.print("<circle class=\"ring\" cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"4\" fill=\"{s}\" stroke-width=\"2\"><title>{s}, {d} {s}: {d:.2} {s}</title></circle>", .{ column(index, counts.len, left, right), scale(v, low, high, top, bottom), color, @tagName(series.server), counts[index], axis, v, panel.measure.unit });
+            try writer.print("<circle class=\"ring\" cx=\"{d:.1}\" cy=\"{d:.1}\" r=\"4\" fill=\"{s}\" stroke-width=\"2\"><title>{s}, {d} {s}: {d:.2} {s}</title></circle>", .{ column(index, counts.len, left, right), scale(v, range, top, bottom), color, @tagName(series.server), counts[index], axis, v, panel.measure.unit });
         };
     }
     try writer.writeByte('\n');
@@ -157,7 +192,7 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
     for (panel.series) |series| {
         var index = series.values.len;
         while (index > 0) : (index -= 1) if (plotted(series.values[index - 1])) |v| {
-            try labels.append(allocator, .{ .server = series.server, .x = column(index - 1, counts.len, left, right) + 8, .y = scale(v, low, high, top, bottom) + 4 });
+            try labels.append(allocator, .{ .server = series.server, .x = column(index - 1, counts.len, left, right) + 8, .y = scale(v, range, top, bottom) + 4 });
             break;
         };
     }
@@ -178,6 +213,80 @@ fn drawPanel(allocator: std.mem.Allocator, writer: *std.Io.Writer, x: f64, y: f6
     for (labels.items) |label| {
         try writer.print("<text class=\"t1\" x=\"{d:.1}\" y=\"{d:.1}\">{s}</text>\n", .{ label.x, label.y, @tagName(label.server) });
     }
+}
+
+/// Where values sit on a panel: from the decade `low` to the decade `high` on a log scale, or from
+/// nothing to `high` in even steps on a linear one.
+const Range = struct {
+    scale: Scale,
+    low: f64,
+    high: f64,
+    step: f64 = 0,
+
+    fn log(minimum: f64, maximum: f64) Range {
+        const low = @floor(std.math.log10(minimum));
+        var high = @ceil(std.math.log10(maximum));
+        if (high <= low) high = low + 1;
+        return .{ .scale = .log, .low = std.math.pow(f64, 10, low), .high = std.math.pow(f64, 10, high) };
+    }
+
+    /// Steps of 1, 2 or 5 times a power of ten, about eight of them to the top.
+    fn linear(maximum: f64) Range {
+        const step = niceStep(maximum / 8);
+        return .{ .scale = .linear, .low = 0, .high = @ceil(maximum / step) * step, .step = step };
+    }
+
+    /// How far up the panel a value sits, from 0 at the bottom to 1 at the top.
+    fn fraction(range: Range, value: f64) f64 {
+        return switch (range.scale) {
+            .log => (std.math.log10(value) - std.math.log10(range.low)) / (std.math.log10(range.high) - std.math.log10(range.low)),
+            .linear => value / range.high,
+        };
+    }
+
+    fn first(range: Range) f64 {
+        return range.low;
+    }
+
+    fn next(range: Range, mark: f64) f64 {
+        return switch (range.scale) {
+            .log => mark * 10,
+            .linear => mark + range.step,
+        };
+    }
+
+    fn label(range: Range, buffer: []u8, mark: f64) []const u8 {
+        return switch (range.scale) {
+            .log => decadeLabel(buffer, @intFromFloat(@round(std.math.log10(mark)))),
+            .linear => std.fmt.bufPrint(buffer, "{d}", .{rounded(mark)}) catch "?",
+        };
+    }
+};
+
+fn niceStep(raw: f64) f64 {
+    std.debug.assert(raw > 0 and std.math.isFinite(raw));
+    const power = std.math.pow(f64, 10, @floor(std.math.log10(raw)));
+    for ([_]f64{ 1, 2, 5 }) |multiple| if (multiple * power >= raw) return multiple * power;
+    return 10 * power;
+}
+
+/// A value as a label shows it, to a tenth.
+fn rounded(value: f64) f64 {
+    return @round(value * 10) / 10;
+}
+
+test "memory on a machine of 15.6 GB reads in steps of 2 GB up to 16" {
+    const range: Range = .linear(15.6);
+    try std.testing.expectEqual(@as(f64, 2), range.step);
+    try std.testing.expectEqual(@as(f64, 16), range.high);
+    try std.testing.expectEqual(@as(f64, 0.5), range.fraction(8));
+}
+
+test "a limit beyond every result still lies within a log range" {
+    const range: Range = .log(0.3, 250);
+    try std.testing.expect(range.fraction(250) <= 1 and range.fraction(0.3) >= 0);
+    try std.testing.expectEqual(@as(f64, 0.1), range.low);
+    try std.testing.expectEqual(@as(f64, 1000), range.high);
 }
 
 /// Where a name nearest `wanted` stops overlapping every name placed, moving a line at a time
@@ -301,8 +410,8 @@ fn begin(writer: *std.Io.Writer, height: usize, title: []const u8) !void {
     try writer.print(
         \\<svg xmlns="http://www.w3.org/2000/svg" width="{d}" height="{d}" viewBox="0 0 {d} {d}">
         \\<style>
-        \\.bg{{fill:#ffffff}} .grid{{stroke:#d1d9e0}} .axis{{stroke:#818b98}} .t1{{fill:#1f2328}} .t2{{fill:#59636e}} .ring{{stroke:#ffffff}}
-        \\@media (prefers-color-scheme: dark){{.bg{{fill:#0d1117}} .grid{{stroke:#2f353d}} .axis{{stroke:#656c76}} .t1{{fill:#f0f6fc}} .t2{{fill:#9198a1}} .ring{{stroke:#0d1117}}}}
+        \\.bg{{fill:#ffffff}} .grid{{stroke:#d1d9e0}} .axis{{stroke:#818b98}} .t1{{fill:#1f2328}} .t2{{fill:#59636e}} .ring{{stroke:#ffffff}} .limit{{stroke:#cf222e}} .limit-text{{fill:#cf222e;font-size:11px}}
+        \\@media (prefers-color-scheme: dark){{.bg{{fill:#0d1117}} .grid{{stroke:#2f353d}} .axis{{stroke:#656c76}} .t1{{fill:#f0f6fc}} .t2{{fill:#9198a1}} .ring{{stroke:#0d1117}} .limit{{stroke:#f85149}} .limit-text{{fill:#f85149}}}}
         \\text{{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;font-size:12px}}
         \\.title{{font-size:16px;font-weight:600}} .panel{{font-size:13px;font-weight:600}}
         \\</style>

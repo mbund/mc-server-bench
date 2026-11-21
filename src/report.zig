@@ -149,6 +149,12 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
     var panels: std.ArrayList(charts.Panel) = .empty;
     // One line a server, from its first repetition; the held table shows how far the others went.
     const repeat = (try repeats(allocator, runs, terrain, kind))[0];
+    // The machine's memory, which the memory panel reads against, with the share of it a Java
+    // server's heap may take.
+    var machine_mb: f64 = 0;
+    for (runs) |run| if (matches(run, terrain, kind)) {
+        machine_mb = @max(machine_mb, number(run, &.{ "host", "memory_mb" }));
+    };
     for (charts.measures) |measure| {
         var series: std.ArrayList(charts.Series) = .empty;
         for (std.enums.values(server_module.Kind)) |server| {
@@ -158,7 +164,7 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
                 value.* = null;
                 const run = latest(runs, server, terrain, kind, players, repeat) orelse continue;
                 if (measure.reported and std.mem.eql(u8, text(run, &.{ "window", "mspt", "source" }), "none")) continue;
-                const measured = number(run, measure.path);
+                const measured = number(run, measure.path) * measure.factor;
                 // A log scale has no place for zero.
                 if (measured <= 0) continue;
                 value.* = measured;
@@ -168,7 +174,16 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
         }
         // A measure no server has here, as tick times where none reports its own, takes no panel.
         if (series.items.len == 0) continue;
-        try panels.append(allocator, .{ .measure = measure, .series = series.items });
+        var panel: charts.Panel = .{ .measure = measure, .series = series.items };
+        if (std.mem.eql(u8, measure.path[0], "peak_rss_mb") and machine_mb > 0) {
+            const machine = machine_mb * measure.factor;
+            panel.top = machine;
+            panel.thresholds = try allocator.dupe(charts.Threshold, &.{
+                .{ .value = machine, .label = "machine" },
+                .{ .value = machine * config.java_heap_share, .label = "Java heap limit" },
+            });
+        }
+        try panels.append(allocator, panel);
     }
     const name = try std.fmt.allocPrint(allocator, "{s}-{s}.svg", .{ @tagName(terrain), @tagName(kind) });
     const title = try std.fmt.allocPrint(allocator, "{s} terrain, {s}", .{ terrainName(terrain), @tagName(kind) });
@@ -176,7 +191,7 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
     const folder = try std.fs.path.join(allocator, &.{ directory, "charts" });
     try std.Io.Dir.cwd().createDirPath(io, folder);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ folder, name }), .data = image });
-    try writer.print("![{s}: CPU time, tick time, traffic and memory by number of {s}, on log scales]({s})\n\n", .{ title, kind.counted(), try chartLink(allocator, charts_url, name) });
+    try writer.print("![{s}: CPU time, tick time, traffic, memory and action latency by number of {s}, with the bench's limits]({s})\n\n", .{ title, kind.counted(), try chartLink(allocator, charts_url, name) });
     try writer.writeAll("A gap in a line is a player count without a result, and a server with no tick times of its own has no mspt line.\n\n");
 }
 

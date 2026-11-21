@@ -519,7 +519,8 @@ fn number(line: []const u8, label: []const u8) ?f64 {
 /// Java servers' ramps where the bench set it rather than where they give out. It starts small and
 /// grows, so their memory measures what they use.
 fn javaHeap(allocator: std.mem.Allocator) ![]const u8 {
-    return std.fmt.allocPrint(allocator, "-Xmx{d}m", .{try process.memoryMb() * 3 / 4});
+    const memory: f64 = @floatFromInt(try process.memoryMb());
+    return std.fmt.allocPrint(allocator, "-Xmx{d}m", .{@as(u64, @intFromFloat(memory * config.java_heap_share))});
 }
 
 /// Room Folia gets beyond the players of a run. Folia counts players still logging in as on the
@@ -576,28 +577,35 @@ fn prepare(allocator: std.mem.Allocator, io: std.Io, options: Options) !void {
             if (options.kind == .@"fabric-optimized") try prepareFabric(allocator, io, options);
             try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "eula.txt"), .data = "eula=true\n" });
             const world = try worldSettings(allocator, options.kind, options.terrain);
-            try cwd.writeFile(io, .{ .sub_path = try path(allocator, options.directory, "server.properties"), .data = try std.fmt.allocPrint(allocator,
-                \\online-mode={}
-                \\enforce-secure-profile=false
-                \\server-port={d}
-                \\gamemode=creative
-                \\{s}spawn-protection=0
-                \\pause-when-empty-seconds=0
-                \\view-distance={d}
-                \\simulation-distance={d}
-                \\max-players={d}
-                \\allow-flight=true
-                \\{s}
-            , .{
-                // Vanilla encrypts only in online mode, checking players with the bench's session
-                // server. Generating a world needs no players.
-                options.encryption and !options.generating,
-                config.port, world, scenario.view_distance, config.simulation_distance, config.maxPlayers(options.players) + @as(usize, if (options.kind == .folia) folia_headroom else 0),
-                // Pregenerating loads a thousand chunks at once, and a tick waiting on them can pass
-                // the minute after which vanilla's watchdog stops the server. It is not measured,
-                // so the watchdog is off then.
-                if (options.generating) "max-tick-time=-1\n" else "",
-            }) });
+            try cwd.writeFile(io, .{
+                .sub_path = try path(allocator, options.directory, "server.properties"),
+                .data = try std.fmt.allocPrint(allocator,
+                    \\online-mode={}
+                    \\enforce-secure-profile=false
+                    \\server-port={d}
+                    \\gamemode=creative
+                    \\{s}spawn-protection=0
+                    \\pause-when-empty-seconds=0
+                    \\view-distance={d}
+                    \\simulation-distance={d}
+                    \\max-players={d}
+                    \\allow-flight=true
+                    \\{s}
+                , .{
+                    // Vanilla encrypts only in online mode, checking players with the bench's session
+                    // server. Generating a world needs no players.
+                    options.encryption and !options.generating,
+                    config.port,
+                    world,
+                    scenario.view_distance,
+                    config.simulation_distance,
+                    config.maxPlayers(options.players) + @as(usize, if (options.kind == .folia) folia_headroom else 0),
+                    // Pregenerating loads a thousand chunks at once, and a tick waiting on them can pass
+                    // the minute after which vanilla's watchdog stops the server. It is not measured,
+                    // so the watchdog is off then.
+                    if (options.generating) "max-tick-time=-1\n" else "",
+                }),
+            });
             if (!options.generating) try copy(allocator, io, vanilla_world, try path(allocator, options.directory, "world"));
         },
         .@"lightning-rod" => {

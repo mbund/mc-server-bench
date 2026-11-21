@@ -37,6 +37,26 @@ pub const farm_built_file = "farm.built";
 pub const warp_file = "warp";
 pub const warped_file = "warped";
 
+/// What makes a step of players too many. A step that breaks one ends the run, recorded with the
+/// limit it broke, so the step before it is the most the server held. The report's charts draw
+/// them.
+pub const limits = struct {
+    /// The server falling behind, from the world time the bots receive.
+    pub const tps = 19.0;
+    /// The longest a tick may take and keep up with 20 ticks a second.
+    pub const mspt = 50.0;
+    /// The server acknowledging a player's action late: five ticks, its ticks or what it still has
+    /// to send that far behind.
+    pub const action_p99_ms = 250.0;
+    /// The bots' own CPUs this busy, past which they may read what the server sent late enough to
+    /// break the other limits themselves. A step that reaches it measured the bots rather than the
+    /// server, so it ends the run as inconclusive rather than as the server's limit.
+    pub const bot_cpu = 0.70;
+};
+
+/// The share of the machine's memory a Java server's heap may grow to.
+pub const java_heap_share = 0.75;
+
 /// Blocks between neighbouring cows in `cows`: a cow's width, so neighbours stand touching and
 /// every step one takes pushes another, which tests collisions as well as ticking and sending.
 /// 8192 then cover a field about 82 blocks across, every cow within 96 blocks of the player in

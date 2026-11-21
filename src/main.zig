@@ -522,19 +522,7 @@ const Run = struct {
     }
 };
 
-/// What makes a step of players too many. A step that breaks one ends the run, recorded with the
-/// limit it broke, so the step before it is the most the server held.
-const limits = struct {
-    /// The server falling behind, from the world time the bots receive.
-    const tps = 19.0;
-    /// The server acknowledging a player's action late: five ticks, its ticks or what it still has
-    /// to send that far behind.
-    const action_p99_ms = 250.0;
-    /// The bots' own CPUs this busy, past which they may read what the server sent late enough to
-    /// break the other limits themselves. A step that reaches it measured the bots rather than the
-    /// server, so it ends the run as inconclusive rather than as the server's limit.
-    const bot_cpu = 0.70;
-};
+const limits = config.limits;
 
 /// Measures one server in one scenario. The server starts once, then each count in `steps` comes
 /// in turn, players joining or, in the cows scenario, cows around its one player, settles and is
