@@ -24,11 +24,18 @@ record() {
 }
 
 # Every server built from source targets the same CPU model: this machine's unless told one, as
-# CI does, which builds on one machine and runs on others. Zig names it with underscores and Rust
-# with dashes.
+# CI does, which builds on one machine and runs on others, with any features past the model's
+# after it, like x86_64_v3+aes. Zig takes them together and names the model with underscores;
+# Rust takes features apart and names the model with dashes.
 model=${MC_SERVER_BENCH_CPU:-native}
 cpu=-Dcpu=$model
-rust_cpu=-Ctarget-cpu=${model//_/-}
+base=${model%%+*}
+rust_flags=("-Ctarget-cpu=${base//_/-}")
+features=${model#"$base"}
+if [ -n "$features" ]; then
+  features=${features#+}
+  rust_flags+=("-Ctarget-feature=+${features//+/,+}")
+fi
 
 # The bench builds against Lightning Rod's protocol packages, and so does its Lightning Rod server.
 if wants bench lightning-rod; then git submodule update --init servers/lightning-rod; fi
@@ -98,7 +105,7 @@ if wants pumpkin; then
   git submodule update --init --recursive servers/pumpkin
   rust=1.98.0
   if command -v rustup > /dev/null; then rustup toolchain install --profile minimal "$rust"; fi
-  (cd servers/pumpkin && RUSTUP_TOOLCHAIN=$rust RUST_MIN_STACK=1073741824 RUSTFLAGS="$rust_cpu" cargo build --release)
+  (cd servers/pumpkin && RUSTUP_TOOLCHAIN=$rust RUST_MIN_STACK=1073741824 RUSTFLAGS="${rust_flags[*]}" cargo build --release)
   record pumpkin
 fi
 
@@ -114,7 +121,8 @@ if wants steel; then
     git -C servers/steel apply --reverse --check "$patch" 2>/dev/null || git -C servers/steel apply "$patch"
   done
   # The CPU model joins the target flags its own config sets, which RUSTFLAGS would replace.
-  flags="target.x86_64-unknown-linux-gnu.rustflags=[\"$rust_cpu\"]"
+  quoted=$(printf '"%s", ' "${rust_flags[@]}")
+  flags="target.x86_64-unknown-linux-gnu.rustflags=[${quoted%, }]"
   if command -v rustup > /dev/null; then
     (cd servers/steel && rustup toolchain install && cargo build --release -p steel --config "$flags")
   else

@@ -24,8 +24,10 @@ env:
   MC_SERVER_BENCH_SHELL: 1
   # Lightning Rod's build needs its Zig cache outside the repository.
   ZIG_LOCAL_CACHE_DIR: /tmp/mc-server-bench-zig
-  # Servers run on other machines than the ones that built them, all of which have AVX2.
-  MC_SERVER_BENCH_CPU: x86_64_v3
+  # Servers run on other machines than the ones that built them, all of which have AVX2 and AES.
+  # The x86-64 levels leave AES out, and Zig takes the level as it is, so without it the harness's
+  # bots and Lightning Rod encrypted in software, while the JVM and Rust's AES find it at runtime.
+  MC_SERVER_BENCH_CPU: x86_64_v3+aes
 
 jobs:
   # The harness that generates the worlds and drives every run, and the keys of the worlds it
