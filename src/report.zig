@@ -177,7 +177,7 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
     try std.Io.Dir.cwd().createDirPath(io, folder);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ folder, name }), .data = image });
     try writer.print("![{s}: CPU time, tick time, traffic and memory by number of {s}, on log scales]({s})\n\n", .{ title, kind.counted(), try chartLink(allocator, charts_url, name) });
-    try writer.writeAll("Log scales, so a server using a hundred times more than another reads as clearly as one using twice as much. A gap in a line is a player count without a result, and a server with no tick times of its own has no mspt line.\n\n");
+    try writer.writeAll("A gap in a line is a player count without a result, and a server with no tick times of its own has no mspt line.\n\n");
 }
 
 /// Where the report links a chart: under the URL the charts were published to, as CI publishes
@@ -251,15 +251,19 @@ fn startupSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writ
     try writer.print(
         \\## Startup, loading and world size
         \\
-        \\Startup is timed from launching the server three ways: to its first answer to a status
+        \\**Startup** is timed from launching the server three ways: to its first answer to a status
         \\request, to a player logged in, without authentication, holding its first chunk, and to
         \\that player holding every chunk of its render distance. Each is the median of the server's
-        \\idle runs. **Arrival to full view** is how long a player moved to where it stands waits for
-        \\every chunk of its render distance there: each step's median player, and its slowest, as
-        \\the median over the idle steps. Players arrive one join interval apart, the same for every
-        \\server, and a step is measured only once all of them hold their views. **World on disk** is everything the server keeps for its world once its idle ramp
-        \\stopped, caches included. On real terrain every server starts from the same
-        \\square of pregenerated chunks, which SteelMC, reading no vanilla worlds, generates itself.
+        \\idle runs.
+        \\
+        \\**Arrival to full view** is how long a player moved to where it stands waits for every
+        \\chunk of its render distance there: each step's median player, and its slowest, as the
+        \\median over the idle steps. Players arrive one join interval apart, the same for every
+        \\server, and a step is measured only once all of them hold their views.
+        \\
+        \\**World on disk** is everything the server keeps for its world once its idle ramp stopped,
+        \\caches included. On real terrain every server starts from the same square of pregenerated
+        \\chunks, which SteelMC, reading no vanilla worlds, generates itself.
         \\
         \\![Startup times, loading times and world size on disk of every server, flat and real terrain, on log scales]({s})
         \\
