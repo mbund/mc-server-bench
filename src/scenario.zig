@@ -74,7 +74,7 @@ pub const Kind = enum {
             .explore => "Everyone flies back and forth across the pregenerated world at 20 blocks a second, so servers load and send terrain from disk.",
             .build => "Everyone places or breaks a block every tick at a spot of their own near spawn.",
             .cows => "One player stands at spawn while cows are summoned touching on a square spiral around them, more each step, all in view and ticking.",
-            .warp => "No one is online while the server runs 122,880 ticks back to back, as /tick sprint does, over 32 force loaded chunks of sugar cane farm with 128 cows on it, which stop strolling with no player near, as vanilla's do, but still tick, fall and collide. Then a player joins to check every cane grew three tall.",
+            .warp => "122,880 ticks back to back with no one online, like `/tick sprint`, over a sugar cane farm with 128 cows. A player then joins to check every cane grew.",
         };
     }
 };
