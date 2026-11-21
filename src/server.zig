@@ -675,6 +675,16 @@ fn preparePaper(allocator: std.mem.Allocator, io: std.Io, options: Options) !voi
         \\      animals: 0
         \\
     });
+    // Paper and Folia send each player at most 75 chunks a second and load at most 100, which,
+    // like a client asking for few, would measure the limit rather than the server. -1 lifts
+    // both, as the other servers stream as fast as the bots ask, which is as fast as they can.
+    try cwd.createDirPath(io, try std.fs.path.join(allocator, &.{ options.directory, "config" }));
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(allocator, &.{ options.directory, "config", "paper-global.yml" }), .data =
+        \\chunk-loading-basic:
+        \\  player-max-chunk-load-rate: -1.0
+        \\  player-max-chunk-send-rate: -1.0
+        \\
+    });
     if (options.kind == .@"paper-antifreecam") {
         const plugins = try std.fs.path.join(allocator, &.{ install, "plugins-antifreecam" });
         cwd.access(io, plugins, .{}) catch return error.MissingPaperSetup;
