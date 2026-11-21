@@ -943,16 +943,12 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     try check(allocator, swarm, scenario_kind, &problems);
     result.problems = problems.items;
 
-    // The first limit the step broke, in order of how plainly it is the server's. Bots too busy
-    // come first, as they could have broken any of the others themselves.
+    // The first limit the step broke, in order of how plainly it is the server's.
     const failed = swarm.count(.failed);
     var viewless: usize = 0;
     for (swarm.joining()) |*each| viewless += @intFromBool(each.phase.load(.acquire) != .failed and !scenario_kind.heldView(&each.counters));
     const corrections = swarm.total(.corrections) - first_corrections;
-    result.bot_bound = window.bot_cpu >= limits.bot_cpu;
-    result.limit = if (result.bot_bound)
-        try std.fmt.allocPrint(allocator, "the bots were {d:.0}% busy, too busy to measure the server", .{window.bot_cpu * 100})
-    else if (failed != 0)
+    const broken: []const u8 = if (failed != 0)
         try std.fmt.allocPrint(allocator, "{d} {s} disconnected", .{ failed, if (failed == 1) "player was" else "players were" })
     else if (window.tps < limits.tps)
         try std.fmt.allocPrint(allocator, "{d:.1} TPS", .{window.tps})
@@ -966,6 +962,16 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
         try std.fmt.allocPrint(allocator, "players moved back {d} times", .{corrections})
     else
         "";
+    // Bots too busy could have broken any of the others themselves, which leaves the step
+    // inconclusive, but what else broke is kept with it: bots a little late cannot delay a
+    // server's acknowledgements by seconds.
+    result.bot_bound = window.bot_cpu >= limits.bot_cpu;
+    result.limit = if (!result.bot_bound)
+        broken
+    else if (broken.len == 0)
+        try std.fmt.allocPrint(allocator, "the bots were {d:.0}% busy, too busy to measure the server", .{window.bot_cpu * 100})
+    else
+        try std.fmt.allocPrint(allocator, "the bots were {d:.0}% busy, too busy to measure the server, and {s}", .{ window.bot_cpu * 100, broken });
     result.samples = run.samples.items[first..];
     return result;
 }
