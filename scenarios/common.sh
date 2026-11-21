@@ -3,8 +3,8 @@
 # already, and `measure`, which runs each of those servers with the same harness options.
 # --terrain=<terrain> runs only the runs on that terrain, as CI runs each terrain of a scenario on
 # a machine of its own. --encryption=off runs every server without encrypting its sessions, to
-# measure the rest of it. --repeat=<n> marks the results as the nth repetition, as CI runs each
-# scenario more than once, each on a machine of its own, to show how far one run can be trusted.
+# measure the rest of it. --repeat=<n> marks the results as the nth repetition of the scenario on
+# this machine, as running it again on the same one shows how far one run can be trusted.
 set -euo pipefail
 script=$(realpath "$0")
 cd "$(dirname "${BASH_SOURCE[0]}")/.."

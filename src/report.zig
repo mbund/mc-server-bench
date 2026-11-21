@@ -341,11 +341,11 @@ fn warpTable(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const
 }
 
 /// How far each server went before breaking a limit, in each repetition: the most it kept up
-/// with, and what ended its run, or that it kept up with every step. Repetitions ran on machines
-/// of their own, so how far apart they land shows how much a single run can be trusted.
+/// with, and what ended its run, or that it kept up with every step. How far apart repetitions on
+/// one machine land shows how much a single run can be trusted.
 fn heldTable(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind) !void {
     const repeated = try repeats(allocator, runs, terrain, kind);
-    if (repeated.len > 1) try writer.print("Each cell holds every repetition's result, {d} in all, each on a machine of its own, in order.\n\n", .{repeated.len});
+    if (repeated.len > 1) try writer.print("Each cell holds every repetition's result, {d} in all, in order.\n\n", .{repeated.len});
     try writer.print(
         \\| Server | Most {s} held | Ended by |
         \\|---|---:|---|
@@ -457,7 +457,7 @@ fn latest(runs: []const Object, server: server_module.Kind, terrain: server_modu
     return found;
 }
 
-/// Which repetition of its scenario a run was, each on a machine of its own in CI: the first in
+/// Which repetition of its scenario on its machine a run was: the first in
 /// results from before they were counted.
 fn repeatOf(run: Object) u32 {
     return @max(1, @as(u32, @intFromFloat(number(run, &.{"repeat"}))));

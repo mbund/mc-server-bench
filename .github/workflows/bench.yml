@@ -431,190 +431,120 @@ jobs:
     needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-real, import-real, steel-real]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Each scenario twice, each on a machine of its own, as shared runners vary from one to the
-    # next: how far apart the two land shows how far one run can be trusted.
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/scenario
         with:
           scenario: idle
           terrain: real
-          repeat: ${{ matrix.repeat }}
           needs: ${{ toJSON(needs) }}
 
   idle-flat:
     needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Each scenario twice, each on a machine of its own, as shared runners vary from one to the
-    # next: how far apart the two land shows how far one run can be trusted.
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/scenario
         with:
           scenario: idle
           terrain: flat
-          repeat: ${{ matrix.repeat }}
           needs: ${{ toJSON(needs) }}
 
   wander-real:
     needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-real, import-real, steel-real]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Each scenario twice, each on a machine of its own, as shared runners vary from one to the
-    # next: how far apart the two land shows how far one run can be trusted.
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/scenario
         with:
           scenario: wander
           terrain: real
-          repeat: ${{ matrix.repeat }}
           needs: ${{ toJSON(needs) }}
 
   wander-flat:
     needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Each scenario twice, each on a machine of its own, as shared runners vary from one to the
-    # next: how far apart the two land shows how far one run can be trusted.
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/scenario
         with:
           scenario: wander
           terrain: flat
-          repeat: ${{ matrix.repeat }}
           needs: ${{ toJSON(needs) }}
 
   spread-tiled:
     needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-tiled, import-tiled, steel-tiled]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Each scenario twice, each on a machine of its own, as shared runners vary from one to the
-    # next: how far apart the two land shows how far one run can be trusted.
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/scenario
         with:
           scenario: spread
           terrain: tiled
-          repeat: ${{ matrix.repeat }}
           needs: ${{ toJSON(needs) }}
 
   spread-wide:
     needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-wide, import-wide, steel-wide]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Each scenario twice, each on a machine of its own, as shared runners vary from one to the
-    # next: how far apart the two land shows how far one run can be trusted.
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/scenario
         with:
           scenario: spread
           terrain: wide
-          repeat: ${{ matrix.repeat }}
           needs: ${{ toJSON(needs) }}
 
   explore:
     needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Each scenario twice, each on a machine of its own, as shared runners vary from one to the
-    # next: how far apart the two land shows how far one run can be trusted.
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/scenario
         with:
           scenario: explore
           terrain: flat
-          repeat: ${{ matrix.repeat }}
           needs: ${{ toJSON(needs) }}
 
   build:
     needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Each scenario twice, each on a machine of its own, as shared runners vary from one to the
-    # next: how far apart the two land shows how far one run can be trusted.
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/scenario
         with:
           scenario: build
           terrain: flat
-          repeat: ${{ matrix.repeat }}
           needs: ${{ toJSON(needs) }}
 
   cows:
     needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Each scenario twice, each on a machine of its own, as shared runners vary from one to the
-    # next: how far apart the two land shows how far one run can be trusted.
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/scenario
         with:
           scenario: cows
           terrain: flat
-          repeat: ${{ matrix.repeat }}
           needs: ${{ toJSON(needs) }}
 
   warp:
     needs: [harness, build-lightning-rod, build-pumpkin, build-steel, build-java, terrain-flat, import-flat, steel-flat]
     runs-on: ubuntu-26.04
     timeout-minutes: 360
-    # Each scenario twice, each on a machine of its own, as shared runners vary from one to the
-    # next: how far apart the two land shows how far one run can be trusted.
-    strategy:
-      fail-fast: false
-      matrix:
-        repeat: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/scenario
         with:
           scenario: warp
           terrain: flat
-          repeat: ${{ matrix.repeat }}
           needs: ${{ toJSON(needs) }}
 
   # Every scenario's results in one report, also when one of them failed. Its charts go to the

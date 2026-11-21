@@ -41,8 +41,8 @@ pub const Settings = struct {
     warp_limit_s: u64 = 1800,
     out: []const u8 = "runs/latest",
     keep_worlds: bool = false,
-    /// Which repetition of its scenario the run is, which its results carry, as CI repeats each
-    /// on a machine of its own to show how far one run can be trusted.
+    /// Which repetition of its scenario on this machine the run is, which its results carry, as
+    /// running it again on the same machine shows how far one run can be trusted.
     repeat: u32 = 1,
     /// Whether sessions are encrypted, as on a server open to the internet. Off measures the rest
     /// of a server without the cost of its cipher.

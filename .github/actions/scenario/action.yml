@@ -11,7 +11,7 @@ inputs:
     description: The terrain whose runs it runs, real, flat or wide.
     required: true
   repeat:
-    description: Which repetition of the scenario this is, each on a machine of its own.
+    description: Which repetition of the scenario on this machine this is.
     required: false
     default: "1"
   needs:
