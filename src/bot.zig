@@ -25,6 +25,11 @@ const input_capacity = 64 * 1024;
 /// What a bot queues to send in a pass, a few small packets.
 const output_capacity = 8 * 1024;
 const tick_ns = 50 * std.time.ns_per_ms;
+/// How often a worker reads every one of its sockets, taking whatever piled up in each since: one
+/// submission for all of them, rather than waking for every segment that arrives, most of what the
+/// bots spent once their decoding was cut. It delays what the bots read by up to this, the same
+/// for every server, adding half of it on average to the round trips they time.
+const read_interval_ns = 5 * std.time.ns_per_ms;
 /// The chunks per tick a bot asks for after each batch, about what a vanilla client on a desktop
 /// asks for. Servers cap it, vanilla at 64.
 pub const chunks_per_tick: f32 = 25;
@@ -258,8 +263,11 @@ pub const Bot = struct {
     /// server in the bench encrypts, as real servers do.
     sending: ?java.Cipher = null,
     receiving: ?java.Cipher = null,
-    /// Where in the input decryption starts, set as it begins mid-read.
-    decrypt_from: ?usize = null,
+    /// How far the input is decrypted, in place, from its start: every byte before it the bot
+    /// read, while the bodies of frames it passed by, as `skipTo` does, stay as they came.
+    decrypted_to: usize = 0,
+    /// The encryption answer was queued, so what follows the frame being read is encrypted.
+    encryption_pending: bool = false,
     input: []u8,
     filled: usize = 0,
     output: []u8,
@@ -267,6 +275,9 @@ pub const Bot = struct {
     /// Requests the worker's ring holds for the bot: a receive into the input after what it
     /// holds, a send of the first `send_pending` bytes of its output, and its connect.
     receive_pending: bool = false,
+    /// The room the pending receive had, and whether it filled it, so more may be waiting.
+    receive_room: usize = 0,
+    read_again: bool = false,
     send_pending: usize = 0,
     connect_pending: bool = false,
     /// Receiving a frame larger than `input`, of `frame_total` bytes, into the worker's overflow,
@@ -305,6 +316,12 @@ pub const Bot = struct {
     heading: f64 = 0,
     random: std.Random.DefaultPrng,
     failure: ?anyerror = null,
+    /// When the bot last read and last sent anything, and what it was doing when it failed, to
+    /// tell a server that dropped a bot from a bot that went quiet.
+    last_read_ns: u64 = 0,
+    last_sent_ns: u64 = 0,
+    state: [160]u8 = undefined,
+    state_len: u8 = 0,
     reason: [160]u8 = undefined,
     reason_len: u8 = 0,
     counters: Counters = .{},
@@ -338,17 +355,23 @@ pub const Bot = struct {
         return self.name[0..self.name_len];
     }
 
+    pub fn stateText(self: *const Bot) []const u8 {
+        return self.state[0..self.state_len];
+    }
+
     pub fn reasonText(self: *const Bot) []const u8 {
         return self.reason[0..self.reason_len];
     }
 
     /// Writes the frame the bot could not read to `failed-frames/<bot>.bin` in the run's directory: a
     /// line of JSON saying what failed and what came before, then everything the input held,
-    /// decrypted, the frame at `frame_start..frame_end` among it. Whether its bytes are a whole
-    /// stream of the wrong length, a stream that turns into another packet partway, or nothing
-    /// like a frame at all tells a server's bad bytes from a bot that lost its place.
-    fn saveFailure(self: *Bot, worker: *Worker, err: anyerror, input: []const u8, frame_start: usize, frame_end: usize) void {
+    /// decrypted as far as `decrypted_to` but for the bodies of frames passed by unread, the frame
+    /// at `frame_start..frame_end` among it. Whether its bytes are a whole stream of the wrong
+    /// length, a stream that turns into another packet partway, or nothing like a frame at all
+    /// tells a server's bad bytes from a bot that lost its place.
+    fn saveFailure(self: *Bot, worker: *Worker, err: anyerror, buffer: []const u8, frame_start: usize, frame_end: usize) void {
         const directory = worker.swarm.config.failed_frames orelse return;
+        const input = buffer[0..self.filled];
         var name: [64]u8 = undefined;
         const path = std.fmt.bufPrintSentinel(&name, "failed-frames/{s}.bin", .{self.label()}, 0) catch return;
         _ = linux.mkdirat(directory, "failed-frames", 0o755);
@@ -358,8 +381,8 @@ pub const Bot = struct {
         defer _ = linux.close(fd);
         var header_bytes: [2048]u8 = undefined;
         var header: std.Io.Writer = .fixed(&header_bytes);
-        header.print("{{\"bot\":\"{s}\",\"error\":\"{s}\",\"phase\":\"{s}\",\"compressed\":{},\"encrypted\":{},\"overflow\":{},\"frame_start\":{d},\"frame_end\":{d},\"input_bytes\":{d},\"frames_read\":{d},\"recent\":[", .{
-            self.label(), @errorName(err), @tagName(self.phase.load(.monotonic)), self.compressed, self.receiving != null, self.large, frame_start, frame_end, input.len, self.recent_count,
+        header.print("{{\"bot\":\"{s}\",\"error\":\"{s}\",\"phase\":\"{s}\",\"compressed\":{},\"encrypted\":{},\"overflow\":{},\"frame_start\":{d},\"frame_end\":{d},\"input_bytes\":{d},\"decrypted_to\":{d},\"frames_read\":{d},\"recent\":[", .{
+            self.label(), @errorName(err), @tagName(self.phase.load(.monotonic)), self.compressed, self.receiving != null, self.large, frame_start, frame_end, input.len, self.decrypted_to, self.recent_count,
         }) catch return;
         // Oldest first: packet id, bytes on the wire, bytes decoded.
         const kept = @min(self.recent_count, self.recent.len);
@@ -381,6 +404,14 @@ pub const Bot = struct {
     fn fail(self: *Bot, err: anyerror, reason: []const u8) void {
         if (self.phase.load(.monotonic) == .failed) return;
         self.failure = err;
+        const moment = now();
+        const state = std.fmt.bufPrint(&self.state, "in {s}, spawned {}, placed {}, last read {d} ms and sent {d} ms before, {d} keep alives, receive pending {}, waiting for overflow {}, {d} bytes held, {d} to send", .{
+            @tagName(self.phase.load(.monotonic)),              self.spawned,                                      self.placed,
+            (moment -| self.last_read_ns) / std.time.ns_per_ms, (moment -| self.last_sent_ns) / std.time.ns_per_ms, self.counters.get(.keepalives),
+            self.receive_pending,                               self.waiting_overflow,                              self.filled,
+            self.queued,
+        }) catch "";
+        self.state_len = @intCast(state.len);
         var length: usize = 0;
         // Keep the readable part of a disconnect reason, whatever form it came in.
         for (reason) |byte| {
@@ -466,7 +497,8 @@ pub const Bot = struct {
         self.fd = @intCast(socket);
         self.sending = null;
         self.receiving = null;
-        self.decrypt_from = null;
+        self.decrypted_to = 0;
+        self.encryption_pending = false;
         const one: i32 = 1;
         _ = linux.setsockopt(self.fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, std.mem.asBytes(&one), @sizeOf(i32));
     }
@@ -496,25 +528,23 @@ pub const Bot = struct {
     fn received(self: *Bot, worker: *Worker, result: usize) !void {
         const buffer = self.inputBuffer(worker);
         assert(result > 0 and result <= buffer.len - self.filled);
-        if (self.receiving) |*cipher| {
-            const read = buffer[self.filled..][0..result];
-            cipher.transform(.decrypt, read, read);
-        }
         self.filled += result;
 
         var start: usize = 0;
         // The whole length of the frame left incomplete, once its length arrived.
         var incomplete: usize = 0;
         while (start < self.filled) {
+            // The frame's length and the start of its packet, which the bot reads of every frame.
+            self.decryptTo(buffer, @min(self.filled, start + head_bytes));
             const length, const prefix = readVarint(buffer[start..self.filled]) catch |err| switch (err) {
                 error.Incomplete => break,
                 else => {
-                    self.saveFailure(worker, err, buffer[0..self.filled], start, self.filled);
+                    self.saveFailure(worker, err, buffer, start, self.filled);
                     return err;
                 },
             };
             if (length <= 0 or length > frame_maximum) {
-                self.saveFailure(worker, error.InvalidFrame, buffer[0..self.filled], start, self.filled);
+                self.saveFailure(worker, error.InvalidFrame, buffer, start, self.filled);
                 return error.InvalidFrame;
             }
             const end = start + prefix + @as(usize, @intCast(length));
@@ -522,21 +552,21 @@ pub const Bot = struct {
                 incomplete = end - start;
                 break;
             }
-            self.frame(worker, buffer[start + prefix .. end]) catch |err| {
-                self.saveFailure(worker, err, buffer[0..self.filled], start, end);
+            self.frame(worker, buffer, start + prefix, end) catch |err| {
+                self.saveFailure(worker, err, buffer, start, end);
                 return err;
             };
             if (self.phase.load(.monotonic) == .failed) return;
             start = end;
-            // What arrived after the encryption request is already encrypted.
-            if (self.decrypt_from) |_| {
-                const rest = buffer[end..self.filled];
-                self.receiving.?.transform(.decrypt, rest, rest);
-                self.decrypt_from = null;
+            // What arrived after the encryption request is encrypted, none of it decrypted yet.
+            if (self.encryption_pending) {
+                self.decrypted_to = end;
+                self.encryption_pending = false;
             }
         }
         std.mem.copyForwards(u8, buffer[0 .. self.filled - start], buffer[start..self.filled]);
         self.filled -= start;
+        self.decrypted_to -= start;
         if (self.large) {
             // It received exactly the rest of its large frame, so nothing follows it.
             if (self.filled == 0) {
@@ -568,8 +598,95 @@ pub const Bot = struct {
         return self.input[self.filled..];
     }
 
-    fn frame(self: *Bot, worker: *Worker, raw: []const u8) !void {
+    /// Decrypts the input in place up to `to`, on from as far as it was, as the server's stream
+    /// goes on.
+    fn decryptTo(self: *Bot, buffer: []u8, to: usize) void {
+        if (to <= self.decrypted_to) return;
+        if (self.receiving) |*cipher| cipher.transform(.decrypt, buffer[self.decrypted_to..to], buffer[self.decrypted_to..to]);
+        self.decrypted_to = to;
+    }
+
+    /// Passes the input by up to `to` without decrypting it. CFB8 goes on from the 16 bytes of
+    /// ciphertext before any byte, which are still in the input as they came, or, as far as fewer
+    /// were passed by, in the cipher's register.
+    fn skipTo(self: *Bot, buffer: []const u8, to: usize) void {
+        if (to <= self.decrypted_to) return;
+        if (self.receiving) |*cipher| {
+            const passed = to - self.decrypted_to;
+            if (passed >= cipher.feedback.len) {
+                @memcpy(&cipher.feedback, buffer[to - cipher.feedback.len .. to]);
+            } else {
+                std.mem.copyForwards(u8, cipher.feedback[0 .. cipher.feedback.len - passed], cipher.feedback[passed..]);
+                @memcpy(cipher.feedback[cipher.feedback.len - passed ..], buffer[self.decrypted_to..to]);
+            }
+        }
+        self.decrypted_to = to;
+    }
+
+    /// Handles the frame at `buffer[from..to]`, decrypted as far as its start. In play, every bot
+    /// but the first decodes a packet only as far as it reads it, as most of what servers send,
+    /// chunks above all, is only counted: its id, a chunk's position, and the whole of the few
+    /// small packets the bots answer, as `read_whole` lists, and passes the rest by. The first
+    /// bot decodes everything whole, checking every server's frames decrypt and inflate as a
+    /// client's would.
+    fn frame(self: *Bot, worker: *Worker, buffer: []u8, from: usize, to: usize) !void {
+        // A frame no longer than the start every frame is decrypted as far as is read whole.
+        if (self.phase.load(.monotonic) != .play or self.index == 0 or to <= self.decrypted_to) {
+            self.decryptTo(buffer, to);
+            return self.whole(worker, buffer[from..to]);
+        }
+        const head = buffer[from..self.decrypted_to];
+        var body: []const u8 = head;
+        var decoded = to - from;
+        var peeked: [peek_maximum]u8 = undefined;
+        if (self.compressed) {
+            const length, const prefix = try readVarint(head);
+            body = head[prefix..];
+            decoded -= prefix;
+            if (length != 0) {
+                if (length < 0 or length > decoded_maximum) return error.InvalidPacket;
+                decoded = @intCast(length);
+                body = try self.peek(buffer, from + prefix, to, peeked[0..@min(peeked.len, decoded)]);
+            }
+        }
+        var reader: Reader = .{ .bytes = body };
+        const id = try reader.varint();
+        if (readsWhole(id, worker.swarm.config.kind)) {
+            self.decryptTo(buffer, to);
+            return self.whole(worker, buffer[from..to]);
+        }
+        self.skipTo(buffer, to);
+        self.account(id, to - from, decoded);
+        try self.playPacket(worker, id, &reader, to - from);
+    }
+
+    /// The first `output.len` bytes the compressed packet at `buffer[from..to]` decodes to,
+    /// decrypting and inflating only as much of it as they take: the start of a stream, rarely
+    /// more than its first few hundred bytes.
+    fn peek(self: *Bot, buffer: []u8, from: usize, to: usize, output: []u8) ![]const u8 {
+        var taken: usize = 256;
+        while (true) : (taken *= 8) {
+            const end = @min(to, from + taken);
+            self.decryptTo(buffer, end);
+            if (inflatePrefix(buffer[from..end], output)) |_| {
+                return output;
+            } else |err| if (end == to) return err;
+        }
+    }
+
+    /// Counts a frame the bot read, under the packet's id in play.
+    fn account(self: *Bot, id: i32, wire: usize, decoded: usize) void {
         self.counters.add(.packets_in, 1);
+        self.recent[self.recent_count % self.recent.len] = .{ .id = id, .wire = @intCast(wire), .decoded = @intCast(decoded) };
+        self.recent_count += 1;
+        const traffic = if (self.phase.load(.monotonic) == .play and id >= 0 and id < self.play.len) &self.play[@intCast(id)] else &self.setup;
+        traffic.count += 1;
+        traffic.wire_bytes += wire;
+        traffic.decoded_bytes += decoded;
+    }
+
+    /// Handles a frame decrypted whole, inflating its packet whole.
+    fn whole(self: *Bot, worker: *Worker, raw: []const u8) !void {
         if (self.index == 0 and self.phase.load(.monotonic) == .play) if (worker.swarm.config.dump) |fd| {
             var size: [4]u8 = undefined;
             std.mem.writeInt(u32, &size, @intCast(raw.len), .little);
@@ -587,12 +704,7 @@ pub const Bot = struct {
         }
         var reader: Reader = .{ .bytes = body };
         const id = try reader.varint();
-        self.recent[self.recent_count % self.recent.len] = .{ .id = id, .wire = @intCast(raw.len), .decoded = @intCast(body.len) };
-        self.recent_count += 1;
-        const traffic = if (self.phase.load(.monotonic) == .play and id >= 0 and id < self.play.len) &self.play[@intCast(id)] else &self.setup;
-        traffic.count += 1;
-        traffic.wire_bytes += raw.len;
-        traffic.decoded_bytes += body.len;
+        self.account(id, raw.len, body.len);
         switch (self.phase.load(.monotonic)) {
             .login => try self.loginPacket(worker, id, &reader),
             .configuration => try self.configurationPacket(id, &reader),
@@ -651,7 +763,7 @@ pub const Bot = struct {
         try self.queueCompressible(worker, packet.bytes());
         self.sending = java.Cipher.init(secret);
         self.receiving = java.Cipher.init(secret);
-        self.decrypt_from = 0;
+        self.encryption_pending = true;
     }
 
     /// What a vanilla client sends as configuration starts: its brand and settings.
@@ -708,6 +820,22 @@ pub const Bot = struct {
         } else if (id == In.packetId(.disconnect)) {
             self.fail(error.ConfigurationRejected, reader.rest());
         }
+    }
+
+    /// The play packets `playPacket` reads past their start, which bots decode whole, and in the
+    /// warp scenario chunks, whose blocks its check counts. Every other packet comes decoded only
+    /// as far as `peek_maximum` bytes, so a packet read further and left off here reads truncated
+    /// and fails the bot, its frame saved, rather than reading wrong.
+    const read_whole = [_]Protocol.play.toClient.PacketName{
+        .unload_chunk, .ping_response, .keep_alive,     .ping,                       .update_time,         .login,           .spawn_position,
+        .position,     .spawn_entity,  .entity_destroy, .acknowledge_player_digging, .start_configuration, .kick_disconnect,
+    };
+
+    fn readsWhole(id: i32, kind: scenario.Kind) bool {
+        const In = Protocol.play.toClient;
+        if (id == In.packetId(.map_chunk)) return kind == .warp;
+        inline for (read_whole) |name| if (id == In.packetId(name)) return true;
+        return false;
     }
 
     fn playPacket(self: *Bot, worker: *Worker, id: i32, reader: *Reader, frame_bytes: usize) !void {
@@ -1022,6 +1150,8 @@ const Worker = struct {
     /// When the earliest timeout armed in the ring fires, or never.
     alarm: u64 = std.math.maxInt(u64),
     alarm_time: linux.kernel_timespec = undefined,
+    /// When the worker next reads every socket.
+    next_read: u64 = 0,
     thread: ?std.Thread = null,
 
     const Request = enum(u2) { receive, send, connect, alarm };
@@ -1036,6 +1166,12 @@ const Worker = struct {
         var tick: u64 = 0;
         while (!swarm.stopping.load(.acquire)) {
             const moment = now();
+            const reading = moment >= self.next_read;
+            if (reading) {
+                self.next_read += read_interval_ns;
+                // A worker that fell behind reads from now on rather than bursting the reads it missed.
+                if (self.next_read <= moment) self.next_read = moment + read_interval_ns;
+            }
             var next_join: u64 = std.math.maxInt(u64);
             for (swarm.bots[self.first..self.last], self.first..) |*bot, index| {
                 if (bot.phase.load(.monotonic) != .waiting or bot.fd >= 0) continue;
@@ -1082,13 +1218,17 @@ const Worker = struct {
                     continue;
                 }
                 if (bot.connect_pending) continue;
-                if (!bot.receive_pending) receive: {
+                // What piled up since the last read, at once, without waiting for more: nothing in
+                // the ring waits on a socket, so data arriving wakes no one.
+                if (!bot.receive_pending and (reading or bot.read_again)) receive: {
                     const span = bot.receiveSpan(self) orelse break :receive;
-                    _ = self.ring.recv(tag(index, .receive), bot.fd, .{ .buffer = span }, 0) catch |err| {
+                    _ = self.ring.recv(tag(index, .receive), bot.fd, .{ .buffer = span }, linux.MSG.DONTWAIT) catch |err| {
                         bot.fail(err, "could not receive");
                         continue;
                     };
                     bot.receive_pending = true;
+                    bot.receive_room = span.len;
+                    bot.read_again = false;
                 }
                 if (bot.send_pending == 0 and bot.queued > 0) {
                     _ = self.ring.send(tag(index, .send), bot.fd, bot.output[0..bot.queued], 0) catch |err| {
@@ -1099,9 +1239,9 @@ const Worker = struct {
                 }
             }
 
-            // The ring wakes the worker at the next tick, join or action, unless an earlier
+            // The ring wakes the worker at the next tick, join, action or read, unless an earlier
             // timeout already will.
-            const wake = @min(next_tick, next_join, next_action);
+            const wake = @min(next_tick, next_join, next_action, self.next_read);
             if (wake < self.alarm) {
                 self.alarm_time = .{ .sec = @intCast(wake / std.time.ns_per_s), .nsec = @intCast(wake % std.time.ns_per_s) };
                 if (self.ring.timeout(tag(wake, .alarm), &self.alarm_time, 0, linux.IORING_TIMEOUT_ABS)) |_| {
@@ -1141,13 +1281,19 @@ const Worker = struct {
                 bot.connected(self.swarm.address, scenario.view_distance) catch |err| bot.fail(err, "could not log in");
             },
             .receive => {
+                // Nothing arrived since the last read.
+                if (result == -@as(i32, @intFromEnum(linux.E.AGAIN))) return;
                 if (result < 0) return bot.fail(error.ReadFailed, "receive failed");
                 if (result == 0) return bot.fail(error.ConnectionClosed, @errorName(error.ConnectionClosed));
+                // A read that filled its room may have left more, which it reads at once.
+                bot.read_again = @as(usize, @intCast(result)) == bot.receive_room;
+                bot.last_read_ns = now();
                 bot.counters.add(.bytes_in, @intCast(result));
                 bot.received(self, @intCast(result)) catch |err| bot.fail(err, @errorName(err));
             },
             .send => {
                 if (result < 0) return bot.fail(error.WriteFailed, "write failed");
+                bot.last_sent_ns = now();
                 bot.wrote(@intCast(result));
             },
             .alarm => unreachable,
@@ -1440,6 +1586,103 @@ fn readVarint(bytes: []const u8) !struct { i32, usize } {
         if (byte & 0x80 == 0) return .{ @bitCast(value), index + 1 };
     }
     return error.InvalidVarint;
+}
+
+/// The first `output.len` bytes a zlib stream decodes to, inflating no further: most of a chunk
+/// is never read, and inflating all of it was most of what the bots spent. Fails when
+/// `compressed` ends before them, as it does when only the start of a stream was decrypted. The
+/// stream's checksum, at its end, goes unchecked.
+fn inflatePrefix(compressed: []const u8, output: []u8) !void {
+    var input: std.Io.Reader = .fixed(compressed);
+    // Decoding straight into the output, with no window of its own, as nothing it decodes this
+    // early refers further back than the output holds.
+    var decompress: std.compress.flate.Decompress = .init(&input, .zlib, &.{});
+    // Room for a whole match past the bytes wanted, which a match may write in one piece.
+    var room: [peek_maximum + 258]u8 = undefined;
+    assert(output.len <= peek_maximum);
+    var writer: std.Io.Writer = .fixed(&room);
+    decompress.reader.streamExact(&writer, output.len) catch |err| return decompress.err orelse err;
+    @memcpy(output, room[0..output.len]);
+}
+
+/// The most of a packet the bots decode when they read only its start: its id and, for a chunk,
+/// the position after it.
+const peek_maximum = 16;
+
+/// How far every frame is decrypted before it is read: its length, the compressed length of its
+/// packet, and the start of the packet, as far as `peek_maximum` takes. A frame no longer is read
+/// whole.
+const head_bytes = 5 + 5 + peek_maximum;
+
+test "the input decrypts in place on past the stretches passed by, and as the read is dropped" {
+    var prng: std.Random.DefaultPrng = .init(2);
+    const random = prng.random();
+    var secret: [16]u8 = undefined;
+    random.bytes(&secret);
+    // A stream as the server sends it, encrypted from the first byte.
+    var message: [1 << 16]u8 = undefined;
+    random.bytes(&message);
+    var wire = message;
+    var server = java.Cipher.init(secret);
+    server.transform(.encrypt, &wire, &wire);
+
+    var input: [4096]u8 = undefined;
+    var output: [16]u8 = undefined;
+    var bot: Bot = .{ .index = 1, .input = &input, .output = &output, .random = .init(0) };
+    bot.receiving = java.Cipher.init(secret);
+    var sent: usize = 0;
+    var consumed: usize = 0;
+    while (consumed < wire.len) {
+        // A read of some of what the server sent, as the socket hands it over.
+        const arrived = @min(wire.len - sent, input.len - bot.filled, random.uintAtMost(usize, 1500));
+        @memcpy(input[bot.filled..][0..arrived], wire[sent..][0..arrived]);
+        bot.filled += arrived;
+        sent += arrived;
+        // Stretches decrypted and passed by in turn, some shorter than the cipher's register.
+        while (bot.decrypted_to < bot.filled) {
+            const to = @min(bot.filled, bot.decrypted_to + random.uintAtMost(usize, if (random.boolean()) 12 else 400));
+            if (random.boolean()) {
+                const from = bot.decrypted_to;
+                bot.decryptTo(&input, to);
+                try std.testing.expectEqualSlices(u8, message[consumed + from .. consumed + to], input[from..to]);
+            } else bot.skipTo(&input, to);
+        }
+        // Drop the start of the input as the receive loop does once it read it.
+        const start = random.uintAtMost(usize, bot.filled);
+        std.mem.copyForwards(u8, input[0 .. bot.filled - start], input[start..bot.filled]);
+        bot.filled -= start;
+        bot.decrypted_to -= start;
+        consumed += start;
+        if (sent == wire.len) consumed += bot.filled;
+    }
+}
+
+test "a zlib stream's first bytes inflate from the start of it alone" {
+    var encoder: @import("deflate").Encoder = try .init(std.testing.allocator, 6);
+    defer encoder.deinit();
+    var prng: std.Random.DefaultPrng = .init(1);
+    var data: [64 * 1024]u8 = undefined;
+    var compressed: [80 * 1024]u8 = undefined;
+    // Random bytes, a chunk's shape of a short header and long runs, and runs from the first byte.
+    for (0..3) |pattern| {
+        switch (pattern) {
+            0 => prng.random().bytes(&data),
+            1 => {
+                prng.random().bytes(data[0..16]);
+                for (data[16..], 16..) |*byte, index| byte.* = @truncate(index / 4096);
+            },
+            else => @memset(&data, 7),
+        }
+        const stream = try encoder.encode(&data, &compressed);
+        for ([_]usize{ 1, 9, peek_maximum }) |wanted| {
+            var output: [peek_maximum]u8 = undefined;
+            try inflatePrefix(stream, output[0..wanted]);
+            try std.testing.expectEqualSlices(u8, data[0..wanted], output[0..wanted]);
+        }
+        // Too little of the stream fails rather than decoding something else.
+        var output: [peek_maximum]u8 = undefined;
+        try std.testing.expect(std.meta.isError(inflatePrefix(stream[0..2], &output)));
+    }
 }
 
 test "block positions pack as the protocol expects" {
