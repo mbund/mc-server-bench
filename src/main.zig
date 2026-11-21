@@ -30,7 +30,8 @@ pub const Settings = struct {
     /// Half the machine's CPUs each when not given.
     server_cpus: ?[]const u8 = null,
     bot_cpus: ?[]const u8 = null,
-    bot_threads: usize = 4,
+    /// One worker for each of the bots' CPUs when not given, as more would only take turns on them.
+    bot_threads: ?usize = null,
     join_interval_ms: u64 = 200,
     /// The longest a step waits for its players to hold their views before it counts as a limit.
     view_limit_s: u64 = 60,
@@ -38,6 +39,9 @@ pub const Settings = struct {
     warp_limit_s: u64 = 1800,
     out: []const u8 = "runs/latest",
     keep_worlds: bool = false,
+    /// Which repetition of its scenario the run is, which its results carry, as CI repeats each
+    /// on a machine of its own to show how far one run can be trusted.
+    repeat: u32 = 1,
     /// Whether sessions are encrypted, as on a server open to the internet. Off measures the rest
     /// of a server without the cost of its cipher.
     encryption: bool = true,
@@ -69,6 +73,7 @@ pub fn main(init: std.process.Init) !void {
     const split = try process.splitCores(allocator, init.io, cpus);
     if (settings.server_cpus == null) settings.server_cpus = split.server;
     if (settings.bot_cpus == null) settings.bot_cpus = split.bots;
+    if (settings.bot_threads == null) settings.bot_threads = cpuCount(settings.bot_cpus.?);
     if (std.mem.eql(u8, verb, "run")) std.log.info("server cpus {s}, bot cpus {s}", .{ settings.server_cpus.?, settings.bot_cpus.? });
     if (std.mem.eql(u8, verb, "recipe")) {
         const kind = settings.server orelse return usage();
@@ -128,7 +133,7 @@ fn usage() error{InvalidArguments} {
         \\scenarios: idle wander spread explore build cows warp
         \\options: --warmup=<s> --seconds=<s> --server-cpus=<list> --bot-cpus=<list>
         \\         --bot-threads=<n> --join-interval=<ms> --out=<directory> --keep-worlds
-        \\         --dump-frames=<path prefix> --encryption=on|off --warp-limit=<s>
+        \\         --dump-frames=<path prefix> --encryption=on|off --warp-limit=<s> --repeat=<n>
     , .{});
     return error.InvalidArguments;
 }
@@ -177,6 +182,9 @@ fn parseOption(settings: *Settings, argument: []const u8) !void {
         settings.dump_frames = value;
     } else if (std.mem.eql(u8, name, "--port")) {
         settings.port = try std.fmt.parseInt(u16, value, 10);
+    } else if (std.mem.eql(u8, name, "--repeat")) {
+        settings.repeat = try std.fmt.parseInt(u32, value, 10);
+        if (settings.repeat == 0) return error.InvalidArguments;
     } else if (std.mem.eql(u8, name, "--keep-worlds")) {
         settings.keep_worlds = true;
     } else if (std.mem.eql(u8, name, "--encryption")) {
@@ -306,6 +314,8 @@ pub const Result = struct {
     /// Cows summoned around the players, in the cows scenario.
     cows: usize = 0,
     started_unix_s: i64,
+    /// Which repetition of its scenario the run was.
+    repeat: u32 = 1,
     /// From launching the server to its first answer to a status request.
     startup_s: f64,
     /// From launching the server to the first bot, logged in, holding its first chunk, and its
@@ -335,6 +345,9 @@ pub const Result = struct {
     problems: []const []const u8 = &.{},
     /// The limit this step broke, which ended the run, or empty when the server kept up.
     limit: []const u8 = "",
+    /// Whether the limit was the bots' own CPUs rather than the server, which leaves the most the
+    /// server holds unknown beyond the steps before it.
+    bot_bound: bool = false,
     samples: []const Sample = &.{},
     /// The warp scenario's measurement, which has no steps of players.
     warp: Warp = .{},
@@ -512,8 +525,10 @@ const limits = struct {
     /// The server acknowledging a player's action late: five ticks, its ticks or what it still has
     /// to send that far behind.
     const action_p99_ms = 250.0;
-    /// The bots' own CPUs this busy, when the bots rather than the server set the limit.
-    const bot_cpu = 0.95;
+    /// The bots' own CPUs this busy, past which they may read what the server sent late enough to
+    /// break the other limits themselves. A step that reaches it measured the bots rather than the
+    /// server, so it ends the run as inconclusive rather than as the server's limit.
+    const bot_cpu = 0.70;
 };
 
 /// Measures one server in one scenario. The server starts once, then each count in `steps` comes
@@ -538,6 +553,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
         .encrypted = settings.encryption,
         .players = 0,
         .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(),
+        .repeat = settings.repeat,
         .startup_s = 0,
     };
 
@@ -578,7 +594,7 @@ fn measure(allocator: std.mem.Allocator, io: std.Io, root: []const u8, settings:
     defer if (failed_frames) |fd| {
         _ = linux.close(fd);
     };
-    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump, .failed_frames = failed_frames }, if (counting_cows) 1 else most, settings.bot_threads);
+    const swarm = try bot.Swarm.init(allocator, .{ .port = config.port, .kind = scenario_kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms, .dump = dump, .failed_frames = failed_frames }, if (counting_cows) 1 else most, settings.bot_threads.?);
     var run: Run = .{ .allocator = allocator, .io = io, .server = server, .swarm = swarm, .started_ns = launched };
     try swarm.start();
     var swarm_stopped = false;
@@ -661,6 +677,7 @@ fn measureWarp(allocator: std.mem.Allocator, io: std.Io, root: []const u8, setti
         .players = 0,
         .cows = farm.cows,
         .started_unix_s = std.Io.Clock.now(.real, io).toSeconds(),
+        .repeat = settings.repeat,
         .startup_s = 0,
         .warp = .{ .ticks = farm.warp_ticks, .canes = farm.canes, .cows = farm.cows },
     };
@@ -773,7 +790,7 @@ fn measureWarp(allocator: std.mem.Allocator, io: std.Io, root: []const u8, setti
     if (result.warp.cane_full != farm.canes) try problems.append(allocator, try std.fmt.allocPrint(allocator, "{d} of {d} cane grew three tall, {d} short", .{ result.warp.cane_full, farm.canes, result.warp.cane_short }));
     if (result.warp.cows_seen != farm.cows) try problems.append(allocator, try std.fmt.allocPrint(allocator, "the player saw {d} of {d} cows", .{ result.warp.cows_seen, farm.cows }));
     for (swarm.joining()) |*each| if (each.phase.load(.acquire) == .failed)
-        try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} failed: {s} {s}", .{ each.label(), @errorName(each.failure.?), each.reasonText() }));
+        try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} failed: {s} {s} ({s})", .{ each.label(), @errorName(each.failure.?), each.reasonText(), each.stateText() }));
     if (result.limit.len == 0 and problems.items.len != 0) result.limit = "the farm did not grow as vanilla's does";
 
     if (!server.exited.load(.acquire)) result.peak_rss_mb = megabytes((try process.sample(server.pid)).peak_rss_bytes);
@@ -926,15 +943,17 @@ fn step(allocator: std.mem.Allocator, io: std.Io, settings: Settings, run: *Run,
     try check(allocator, swarm, scenario_kind, &problems);
     result.problems = problems.items;
 
-    // The first limit the step broke, in order of how plainly it is the server's.
+    // The first limit the step broke, in order of how plainly it is the server's. Bots too busy
+    // come first, as they could have broken any of the others themselves.
     const failed = swarm.count(.failed);
     var viewless: usize = 0;
     for (swarm.joining()) |*each| viewless += @intFromBool(each.phase.load(.acquire) != .failed and !scenario_kind.heldView(&each.counters));
     const corrections = swarm.total(.corrections) - first_corrections;
-    result.limit = if (failed != 0)
+    result.bot_bound = window.bot_cpu >= limits.bot_cpu;
+    result.limit = if (result.bot_bound)
+        try std.fmt.allocPrint(allocator, "the bots were {d:.0}% busy, too busy to measure the server", .{window.bot_cpu * 100})
+    else if (failed != 0)
         try std.fmt.allocPrint(allocator, "{d} {s} disconnected", .{ failed, if (failed == 1) "player was" else "players were" })
-    else if (window.bot_cpu >= limits.bot_cpu)
-        "the bots ran out of CPU"
     else if (window.tps < limits.tps)
         try std.fmt.allocPrint(allocator, "{d:.1} TPS", .{window.tps})
     else if (window.actions != 0 and window.action_p99_ms > limits.action_p99_ms)
@@ -992,7 +1011,7 @@ fn check(allocator: std.mem.Allocator, swarm: *bot.Swarm, kind: scenario.Kind, p
     for (swarm.joining()) |*each| {
         const counters = &each.counters;
         if (each.phase.load(.acquire) == .failed) {
-            try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} failed: {s} {s}", .{ each.label(), @errorName(each.failure.?), each.reasonText() }));
+            try problems.append(allocator, try std.fmt.allocPrint(allocator, "{s} failed: {s} {s} ({s})", .{ each.label(), @errorName(each.failure.?), each.reasonText(), each.stateText() }));
             continue;
         }
         if (!kind.heldView(counters)) {
@@ -1301,7 +1320,7 @@ fn bots(allocator: std.mem.Allocator, io: std.Io, settings: Settings) !void {
         std.log.err("nothing is listening on port {d}", .{settings.port});
         return error.NothingListening;
     }
-    const swarm = try bot.Swarm.init(allocator, .{ .port = settings.port, .kind = kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms }, players, settings.bot_threads);
+    const swarm = try bot.Swarm.init(allocator, .{ .port = settings.port, .kind = kind, .terrain = settings.terrain, .join_interval_ns = settings.join_interval_ms * std.time.ns_per_ms }, players, settings.bot_threads.?);
     try swarm.start();
     defer swarm.stop();
     swarm.admit(players);
@@ -1316,7 +1335,7 @@ fn bots(allocator: std.mem.Allocator, io: std.Io, settings: Settings) !void {
             std.log.warn("{s} left: {s}", .{ each.label(), each.reasonText() });
         }
         std.log.info("{d} of {d} spawned, {d} with a full view, {d} left, {d} chunks, moved back {d} times", .{
-            swarm.reached(.spawned_ns), players,              swarm.reached(.viewed_ns), swarm.count(.failed),
+            swarm.reached(.spawned_ns), players,                   swarm.reached(.viewed_ns), swarm.count(.failed),
             swarm.total(.chunks),       swarm.total(.corrections),
         });
         if (swarm.count(.failed) == players) return error.EveryBotLeft;

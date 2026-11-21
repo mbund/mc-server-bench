@@ -105,8 +105,8 @@ pub fn write(allocator: std.mem.Allocator, io: std.Io, directory: []const u8, ch
             continue;
         }
         if (counts.items.len > 1) try chartSection(allocator, io, writer, directory, charts_url, runs.items, terrain, kind, counts.items);
-        try heldTable(writer, runs.items, terrain, kind);
-        for (counts.items) |players| try table(writer, runs.items, terrain, kind, players);
+        try heldTable(allocator, writer, runs.items, terrain, kind);
+        for (counts.items) |players| try table(allocator, writer, runs.items, terrain, kind, players);
     };
     const path = try std.fs.path.join(allocator, &.{ directory, "report.md" });
     try cwd.writeFile(io, .{ .sub_path = path, .data = output.written() });
@@ -125,7 +125,14 @@ fn machines(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const 
         } else try seen.append(allocator, run);
     }
     if (seen.items.len == 0) return;
-    try writer.writeAll(if (seen.items.len == 1) "**Machine:**" else "**Machines** (these runs were joined from more than one, so they compare less exactly):");
+    // Repetitions each run on a machine of their own, with every server of one on the same.
+    const repeated = (try repeats(allocator, runs, terrain, kind)).len > 1;
+    try writer.writeAll(if (seen.items.len == 1)
+        (if (repeated) "**Machine** of every repetition:" else "**Machine:**")
+    else if (repeated)
+        "**Machines** of the repetitions, each repetition's servers on the same one:"
+    else
+        "**Machines** (these runs were joined from more than one, so they compare less exactly):");
     for (seen.items, 0..) |run, index| {
         try writer.print("{s} {s}, {d:.0} CPUs", .{ if (index == 0) "" else ";", text(run, &.{ "host", "cpu" }), number(run, &.{ "host", "cpus" }) });
         if (number(run, &.{ "host", "cores" }) != 0) try writer.print(" on {d:.0} cores", .{number(run, &.{ "host", "cores" })});
@@ -140,6 +147,8 @@ fn machines(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const 
 /// of its own, or else the file beside the report.
 fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer, directory: []const u8, charts_url: ?[]const u8, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, counts: []const u64) !void {
     var panels: std.ArrayList(charts.Panel) = .empty;
+    // One line a server, from its first repetition; the held table shows how far the others went.
+    const repeat = (try repeats(allocator, runs, terrain, kind))[0];
     for (charts.measures) |measure| {
         var series: std.ArrayList(charts.Series) = .empty;
         for (std.enums.values(server_module.Kind)) |server| {
@@ -147,7 +156,7 @@ fn chartSection(allocator: std.mem.Allocator, io: std.Io, writer: *std.Io.Writer
             var any = false;
             for (counts, values) |players, *value| {
                 value.* = null;
-                const run = latest(runs, server, terrain, kind, players) orelse continue;
+                const run = latest(runs, server, terrain, kind, players, repeat) orelse continue;
                 if (measure.reported and std.mem.eql(u8, text(run, &.{ "window", "mspt", "source" }), "none")) continue;
                 const measured = number(run, measure.path);
                 // A log scale has no place for zero.
@@ -290,13 +299,14 @@ fn warpTable(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const
         \\
     );
     var order: std.ArrayList(Object) = .empty;
-    for (std.enums.values(server_module.Kind)) |server| {
+    const repeated = try repeats(allocator, runs, terrain, .warp);
+    for (std.enums.values(server_module.Kind)) |server| for (repeated) |repeat| {
         var found: ?Object = null;
         for (runs) |run| {
-            if (matches(run, terrain, .warp) and std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) found = run;
+            if (matches(run, terrain, .warp) and std.mem.eql(u8, text(run, &.{"server"}), @tagName(server)) and repeatOf(run) == repeat) found = run;
         }
         if (found) |run| try order.append(allocator, run);
-    }
+    };
     const Speed = struct {
         fn key(run: Object) f64 {
             const ms = number(run, &.{ "warp", "ms_per_tick" });
@@ -309,6 +319,7 @@ fn warpTable(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const
     std.mem.sort(Object, order.items, {}, Speed.faster);
     for (order.items) |run| {
         const ms = number(run, &.{ "warp", "ms_per_tick" });
+        const name = if (repeated.len > 1) try std.fmt.allocPrint(allocator, "{s} #{d}", .{ text(run, &.{"server"}), repeatOf(run) }) else text(run, &.{"server"});
         const problems = if (lookup(run, &.{"problems"})) |value| value.array.items else &.{};
         var listed: std.ArrayList(u8) = .empty;
         for (problems, 0..) |problem, index| {
@@ -316,47 +327,70 @@ fn warpTable(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const
             try listed.appendSlice(allocator, problem.string);
         }
         if (ms == 0) {
-            try writer.print("| {s} | n/a | n/a | n/a | n/a | n/a | n/a | n/a | {s} |\n", .{ text(run, &.{"server"}), listed.items });
+            try writer.print("| {s} | n/a | n/a | n/a | n/a | n/a | n/a | n/a | {s} |\n", .{ name, listed.items });
             continue;
         }
         try writer.print("| {s} | {d:.0} | {d:.3} | {d:.3} | {d:.1} | {d:.0} | {d:.0} of {d:.0} | {d:.0} of {d:.0} | {s} |\n", .{
-            text(run, &.{"server"}),                 1000 / ms,                                    ms,
-            number(run, &.{ "warp", "cpu_ms_per_tick" }), number(run, &.{ "warp", "seconds" }),     number(run, &.{ "warp", "rss_mb_max" }),
-            number(run, &.{ "warp", "cane_full" }),  number(run, &.{ "warp", "canes" }),            number(run, &.{ "warp", "cows_seen" }),
-            number(run, &.{ "warp", "cows" }),       if (listed.items.len == 0) "none" else listed.items,
+            name,                                         1000 / ms,                                           ms,
+            number(run, &.{ "warp", "cpu_ms_per_tick" }), number(run, &.{ "warp", "seconds" }),                number(run, &.{ "warp", "rss_mb_max" }),
+            number(run, &.{ "warp", "cane_full" }),       number(run, &.{ "warp", "canes" }),                  number(run, &.{ "warp", "cows_seen" }),
+            number(run, &.{ "warp", "cows" }),            if (listed.items.len == 0) "none" else listed.items,
         });
     }
     try writer.writeByte('\n');
 }
 
-fn heldTable(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind) !void {
+/// How far each server went before breaking a limit, in each repetition: the most it kept up
+/// with, and what ended its run, or that it kept up with every step. Repetitions ran on machines
+/// of their own, so how far apart they land shows how much a single run can be trusted.
+fn heldTable(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind) !void {
+    const repeated = try repeats(allocator, runs, terrain, kind);
+    if (repeated.len > 1) try writer.print("Each cell holds every repetition's result, {d} in all, each on a machine of its own, in order.\n\n", .{repeated.len});
     try writer.print(
         \\| Server | Most {s} held | Ended by |
         \\|---|---:|---|
         \\
     , .{kind.counted()});
     for (std.enums.values(server_module.Kind)) |server| {
-        var held: f64 = 0;
-        var tried: f64 = 0;
-        var ended: []const u8 = "";
-        for (runs) |run| {
-            if (!matches(run, terrain, kind) or !std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) continue;
-            const count = number(run, &.{kind.counted()});
-            tried = @max(tried, count);
-            const limit = text(run, &.{"limit"});
-            if (limit.len == 0) held = @max(held, count) else ended = limit;
+        var held_cell: std.ArrayList(u8) = .empty;
+        var ended_cell: std.ArrayList(u8) = .empty;
+        for (repeated) |repeat| {
+            var held: f64 = 0;
+            var tried: f64 = 0;
+            var ended: []const u8 = "";
+            var bot_bound = false;
+            for (runs) |run| {
+                if (!matches(run, terrain, kind) or !std.mem.eql(u8, text(run, &.{"server"}), @tagName(server)) or repeatOf(run) != repeat) continue;
+                const count = number(run, &.{kind.counted()});
+                tried = @max(tried, count);
+                const limit = text(run, &.{"limit"});
+                if (limit.len == 0) held = @max(held, count) else {
+                    ended = limit;
+                    bot_bound = botBound(run);
+                }
+            }
+            if (tried == 0) continue;
+            if (held_cell.items.len != 0) {
+                try held_cell.appendSlice(allocator, " / ");
+                try ended_cell.appendSlice(allocator, " / ");
+            }
+            // The bots running out of CPU says nothing of the server, which held at least as many.
+            if (bot_bound) {
+                try held_cell.print(allocator, "at least {d:.0}", .{held});
+                try ended_cell.print(allocator, "inconclusive: {s}", .{ended});
+            } else {
+                if (held == 0) try held_cell.appendSlice(allocator, "none") else try held_cell.print(allocator, "{d:.0}", .{held});
+                try ended_cell.appendSlice(allocator, if (ended.len == 0) "kept up with every step" else ended);
+            }
         }
-        if (tried == 0) continue;
-        if (ended.len == 0) {
-            try writer.print("| {s} | {d:.0} | kept up with every step |\n", .{ @tagName(server), held });
-        } else if (held == 0) {
-            try writer.print("| {s} | none | {s} |\n", .{ @tagName(server), ended });
-        } else try writer.print("| {s} | {d:.0} | {s} |\n", .{ @tagName(server), held, ended });
+        if (held_cell.items.len == 0) continue;
+        try writer.print("| {s} | {s} | {s} |\n", .{ @tagName(server), held_cell.items, ended_cell.items });
     }
     try writer.writeByte('\n');
 }
 
-fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, players: u64) !void {
+fn table(allocator: std.mem.Allocator, writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind, players: u64) !void {
+    const repeated = try repeats(allocator, runs, terrain, kind);
     // Folded away, as a ramp measures many counts.
     try writer.print("<details><summary>{d} {s}</summary>\n\n", .{ players, if (players == 1) kind.counted()[0 .. kind.counted().len - 1] else kind.counted() });
     defer writer.writeAll("</details>\n\n") catch {};
@@ -366,8 +400,8 @@ fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Te
         \\
     );
     var problems: usize = 0;
-    for (std.enums.values(server_module.Kind)) |server| {
-        const run = latest(runs, server, terrain, kind, players) orelse continue;
+    for (std.enums.values(server_module.Kind)) |server| for (repeated) |repeat| {
+        const run = latest(runs, server, terrain, kind, players, repeat) orelse continue;
         const reported = !std.mem.eql(u8, text(run, &.{ "window", "mspt", "source" }), "none");
         const count = if (run.get("problems")) |value| value.array.items.len else 0;
         problems += count;
@@ -375,7 +409,7 @@ fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Te
         const present = @max(1, number(run, &.{"players"}));
         const chunks = number(run, &.{ "bots", "chunks" });
         try writer.print("| {s} | {d:.0} | {d:.2} | {d:.2} | {d:.0} | {d:.2} | ", .{
-            @tagName(server),
+            try rowName(allocator, server, repeat, repeated.len > 1),
             number(run, &.{"total_received_mb"}) * 1024 / present,
             number(run, &.{ "window", "received_kb_per_s_per_player" }),
             if (chunks == 0) 0 else number(run, &.{ "bots", "chunk_bytes" }) / 1024 / chunks,
@@ -393,34 +427,56 @@ fn table(writer: *std.Io.Writer, runs: []const Object, terrain: server_module.Te
             number(run, &.{"world_mb"}),
             count,
         });
-    }
+    };
     try writer.writeByte('\n');
     if (problems == 0) return;
     // Each server's problems folded away under their count, as a run with many bots can list
     // one for each.
-    for (std.enums.values(server_module.Kind)) |server| {
-        const run = latest(runs, server, terrain, kind, players) orelse continue;
+    for (std.enums.values(server_module.Kind)) |server| for (repeated) |repeat| {
+        const run = latest(runs, server, terrain, kind, players, repeat) orelse continue;
         const list = run.get("problems") orelse continue;
         if (list.array.items.len == 0) continue;
-        try writer.print("<details><summary>{s}: {d} {s}</summary>\n\n", .{ @tagName(server), list.array.items.len, if (list.array.items.len == 1) "problem" else "problems" });
+        try writer.print("<details><summary>{s}: {d} {s}</summary>\n\n", .{ try rowName(allocator, server, repeat, repeated.len > 1), list.array.items.len, if (list.array.items.len == 1) "problem" else "problems" });
         for (list.array.items) |problem| try writer.print("- {s}\n", .{problem.string});
         try writer.writeAll("\n</details>\n\n");
-    }
+    };
 }
 
 fn matches(run: Object, terrain: server_module.Terrain, kind: scenario.Kind) bool {
     return std.mem.eql(u8, text(run, &.{"terrain"}), @tagName(terrain)) and std.mem.eql(u8, text(run, &.{"scenario"}), @tagName(kind));
 }
 
-/// The last run of a combination, so a rerun replaces an earlier one.
-fn latest(runs: []const Object, server: server_module.Kind, terrain: server_module.Terrain, kind: scenario.Kind, players: u64) ?Object {
+/// The last run of a combination in a repetition, so a rerun replaces an earlier one.
+fn latest(runs: []const Object, server: server_module.Kind, terrain: server_module.Terrain, kind: scenario.Kind, players: u64, repeat: u32) ?Object {
     var found: ?Object = null;
     for (runs) |run| {
         if (!matches(run, terrain, kind) or !std.mem.eql(u8, text(run, &.{"server"}), @tagName(server))) continue;
-        if (number(run, &.{kind.counted()}) != @as(f64, @floatFromInt(players))) continue;
+        if (number(run, &.{kind.counted()}) != @as(f64, @floatFromInt(players)) or repeatOf(run) != repeat) continue;
         found = run;
     }
     return found;
+}
+
+/// Which repetition of its scenario a run was, each on a machine of its own in CI: the first in
+/// results from before they were counted.
+fn repeatOf(run: Object) u32 {
+    return @max(1, @as(u32, @intFromFloat(number(run, &.{"repeat"}))));
+}
+
+/// The repetitions a scenario on a terrain ran, in order.
+fn repeats(allocator: std.mem.Allocator, runs: []const Object, terrain: server_module.Terrain, kind: scenario.Kind) ![]const u32 {
+    var found: std.ArrayList(u32) = .empty;
+    for (runs) |run| {
+        if (!matches(run, terrain, kind)) continue;
+        if (std.mem.indexOfScalar(u32, found.items, repeatOf(run)) == null) try found.append(allocator, repeatOf(run));
+    }
+    std.mem.sort(u32, found.items, {}, std.sort.asc(u32));
+    return found.items;
+}
+
+/// A server's name in a table, with its repetition where there are more than one.
+fn rowName(allocator: std.mem.Allocator, server: server_module.Kind, repeat: u32, repeated: bool) ![]const u8 {
+    return if (repeated) std.fmt.allocPrint(allocator, "{s} #{d}", .{ @tagName(server), repeat }) else @tagName(server);
 }
 
 fn lookup(object: Object, path: []const []const u8) ?std.json.Value {
@@ -438,6 +494,12 @@ fn number(object: Object, path: []const []const u8) f64 {
         .float => |value| value,
         else => 0,
     };
+}
+
+/// Whether a step ended because the bots ran out of CPU, as results said before they recorded it.
+fn botBound(run: Object) bool {
+    if (lookup(run, &.{"bot_bound"})) |value| if (value == .bool) return value.bool;
+    return std.mem.eql(u8, text(run, &.{"limit"}), "the bots ran out of CPU");
 }
 
 fn text(object: Object, path: []const []const u8) []const u8 {
